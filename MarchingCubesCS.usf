@@ -1,0 +1,338 @@
+//----cjl begin
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+/*=============================================================================
+	MarchingCubesCS.usf: Compute shaders for marching cubes algorithm
+	Includes sphere density generation and marching cubes triangulation
+=============================================================================*/
+
+#pragma once
+#include "/Engine/Private/Common.ush"
+
+static const int numThreads = 8;
+
+// Sphere Density CS parameters
+int NumPointsPerAxis;
+float BoundsSize;
+float3 Offset;
+float SphereRadius;
+
+// 3D Texture Parameters
+Texture3D<float4> InputTexture3D;
+SamplerState InputTexture3DSampler;
+
+// Character Interaction Parameters
+float3 CharacterPos;
+float CharacterCollisionRadius;
+float InteractionStrength;
+uint bEnableCharacterInteraction;
+float4x4 WorldToLocal;
+
+// Marching Cubes CS parameters  
+StructuredBuffer<int> EdgesTable;
+StructuredBuffer<int> TriangulationTable;
+StructuredBuffer<int> cornerIndexAFromEdge;
+StructuredBuffer<int> cornerIndexBFromEdge;
+float IsoLevel;
+uint MaxTriangleCount;
+
+// Persistent density buffer parameters
+RWBuffer<float> PersistentDensityBuffer;  // UAV for writing
+Buffer<float> PersistentDensityBufferSRV; // SRV for reading
+
+// Utility function to convert 3D coordinates to 1D index
+int IndexFromCoord(uint x, uint y, uint z) 
+{
+    return z * NumPointsPerAxis * NumPointsPerAxis + y * NumPointsPerAxis + x;
+}
+
+//=============================================================================
+// Sphere Density Generation Compute Shader
+//=============================================================================
+
+[numthreads(numThreads, numThreads, numThreads)]
+void SphereDensityCS(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= NumPointsPerAxis || id.y >= NumPointsPerAxis || id.z >= NumPointsPerAxis) 
+    {
+        return;
+    }
+
+    float spacing = BoundsSize / (NumPointsPerAxis - 1);
+    float3 pos = id * spacing - BoundsSize / 2.0f;
+    float density = (BoundsSize / 2.0f) - length(pos + Offset);
+
+    int index = IndexFromCoord(id.x, id.y, id.z);
+    PersistentDensityBuffer[index] = density;
+}
+
+//=============================================================================
+// Marching Cubes Triangulation Compute Shader
+//=============================================================================
+
+struct MyTriangle 
+{
+    float3 vertexA; float pack0;
+    float3 normalA; float pack1;
+    float3 vertexB; float pack2;
+    float3 normalB; float pack3;
+    float3 vertexC; float pack4;
+    float3 normalC; float pack5;
+};
+
+RWStructuredBuffer<MyTriangle> Triangles;
+RWBuffer<uint> TriangleCounter;
+
+float3 InterpolateVerts(float4 v1, float4 v2) 
+{
+    float t = (IsoLevel - v1.w) / (v2.w - v1.w);
+    // 直接在这里将米单位转换为UE4的厘米单位
+    return (v1.xyz + t * (v2.xyz - v1.xyz)) * 100.0f;
+}
+
+// Convert grid coordinates to texture UVW coordinates
+float3 CoordToUVW(int3 coord)
+{
+    // Convert grid coordinates to normalized [0,1] range
+    float3 uvw = coord / (float)(NumPointsPerAxis - 1);
+    
+    // Apply coordinate system transformation (based on provided shader code)
+    uvw.xyz = uvw.xzy;  // Swap Y and Z axes
+    uvw.y = 1.0 - uvw.y;  // Flip Y axis
+    
+    return uvw;
+}
+
+// Sample density value at given grid coordinates with bounds checking
+// Modified to read from persistent density buffer instead of 3D texture
+float SampleDensity(int3 coord) 
+{
+    coord = clamp(coord, 0, NumPointsPerAxis - 1);
+    int index = IndexFromCoord(coord.x, coord.y, coord.z);
+    return PersistentDensityBufferSRV[index];
+}
+
+// Estimate normal from density grid using central difference method
+float3 EstimateNormalFromGrid(int3 coord) 
+{
+    float dx = SampleDensity(coord + int3(1, 0, 0)) - SampleDensity(coord - int3(1, 0, 0));
+    float dy = SampleDensity(coord + int3(0, 1, 0)) - SampleDensity(coord - int3(0, 1, 0));
+    float dz = SampleDensity(coord + int3(0, 0, 1)) - SampleDensity(coord - int3(0, 0, 1));
+    // 法线应该指向密度减少的方向（从实体内部指向外部），所以需要反转梯度方向
+    return normalize(-float3(dx, dy, dz));
+}
+
+// Interpolate normal between two grid points
+float3 InterpolateNormal(int3 coordA, int3 coordB, float t) 
+{
+    float3 na = EstimateNormalFromGrid(coordA);
+    float3 nb = EstimateNormalFromGrid(coordB);
+    return normalize(lerp(na, nb, t));
+}
+
+// Corner offsets for cube vertices (used for normal calculation)
+static const int3 cornerOffsets[8] = {
+    int3(0,0,0), int3(1,0,0), int3(1,0,1), int3(0,0,1),
+    int3(0,1,0), int3(1,1,0), int3(1,1,1), int3(0,1,1)
+};
+
+// Calculate world position from grid coordinates
+float3 GridCoordToWorldPos(int3 coord)
+{
+    float spacing = BoundsSize / (NumPointsPerAxis - 1);
+    float3 pos = coord * spacing - BoundsSize / 2.0f;
+    return pos;
+}
+
+[numthreads(numThreads, numThreads, numThreads)]
+void MarchingCubesCS(uint3 id : SV_DispatchThreadID)
+{   
+    // Stop one point before the end because voxel includes neighbouring points
+    if (id.x >= NumPointsPerAxis-1 || id.y >= NumPointsPerAxis-1 || id.z >= NumPointsPerAxis-1) 
+    {
+        return;
+    }
+
+    // 8 corners of the current cube - now using direct texture sampling
+    float4 cubeCorners[8];
+    
+    // Build cube corners using cornerOffsets and direct sampling
+    for (int i = 0; i < 8; i++)
+    {
+        int3 cornerCoord = int3(id) + cornerOffsets[i];
+        float3 worldPos = GridCoordToWorldPos(cornerCoord);
+        float density = SampleDensity(cornerCoord);
+        cubeCorners[i] = float4(worldPos, density);
+    }
+
+    // Calculate unique index for each cube configuration.
+    // There are 256 possible values
+    // A value of 0 means cube is entirely inside surface; 255 entirely outside.
+    // The value is used to look up the edge table, which indicates which edges of the cube are cut by the isosurface.
+    int cubeIndex = 0;
+    if (cubeCorners[0].w < IsoLevel) cubeIndex |= 1;
+    if (cubeCorners[1].w < IsoLevel) cubeIndex |= 2;
+    if (cubeCorners[2].w < IsoLevel) cubeIndex |= 4;
+    if (cubeCorners[3].w < IsoLevel) cubeIndex |= 8;
+    if (cubeCorners[4].w < IsoLevel) cubeIndex |= 16;
+    if (cubeCorners[5].w < IsoLevel) cubeIndex |= 32;
+    if (cubeCorners[6].w < IsoLevel) cubeIndex |= 64;
+    if (cubeCorners[7].w < IsoLevel) cubeIndex |= 128;
+
+    // Create triangles for current cube configuration
+    for (int i = 0; TriangulationTable[cubeIndex*16 + i] != -1; i += 3) 
+    {
+        // Get indices of corner points A and B for each of the three edges
+        int edge0 = TriangulationTable[cubeIndex*16 + i];
+        int edge1 = TriangulationTable[cubeIndex*16 + i + 1];
+        int edge2 = TriangulationTable[cubeIndex*16 + i + 2];
+
+        int a0 = cornerIndexAFromEdge[edge0];
+        int b0 = cornerIndexBFromEdge[edge0];
+
+        int a1 = cornerIndexAFromEdge[edge1];
+        int b1 = cornerIndexBFromEdge[edge1];
+
+        int a2 = cornerIndexAFromEdge[edge2];
+        int b2 = cornerIndexBFromEdge[edge2];
+
+        // Calculate interpolation parameters
+        float4 p0a = cubeCorners[a0];
+        float4 p0b = cubeCorners[b0];
+        
+        float4 p1a = cubeCorners[a1];
+        float4 p1b = cubeCorners[b1];
+        float4 p2a = cubeCorners[a2];
+        float4 p2b = cubeCorners[b2];
+
+        float t0 = (IsoLevel - p0a.w) / (p0b.w - p0a.w);
+        float t1 = (IsoLevel - p1a.w) / (p1b.w - p1a.w);
+        float t2 = (IsoLevel - p2a.w) / (p2b.w - p2a.w);
+
+        MyTriangle tri;
+        // 交换顶点B和C的顺序以修正DX12中的三角形绕序问题
+        tri.vertexA = InterpolateVerts(cubeCorners[a0], cubeCorners[b0]);
+        tri.normalA = InterpolateNormal(id + cornerOffsets[a0], id + cornerOffsets[b0], t0);
+        tri.vertexB = InterpolateVerts(cubeCorners[a2], cubeCorners[b2]);  // 原来是a1,b1
+        tri.normalB = InterpolateNormal(id + cornerOffsets[a2], id + cornerOffsets[b2], t2);  // 原来是a1,b1,t1
+        tri.vertexC = InterpolateVerts(cubeCorners[a1], cubeCorners[b1]);  // 原来是a2,b2
+        tri.normalC = InterpolateNormal(id + cornerOffsets[a1], id + cornerOffsets[b1], t1);  // 原来是a2,b2,t2
+        tri.pack0 = 0.0f;
+        tri.pack1 = 0.0f;
+        tri.pack2 = 0.0f;
+        tri.pack3 = 0.0f;
+        tri.pack4 = 0.0f;
+        tri.pack5 = 0.0f;
+        
+        uint triangleIndex;
+        InterlockedAdd(TriangleCounter[0], 1U, triangleIndex);
+        if (triangleIndex < (uint)MaxTriangleCount) 
+        {
+            Triangles[triangleIndex] = tri;
+        }
+    }
+}
+
+//=============================================================================
+// 3D Texture to Buffer Compute Shader
+//=============================================================================
+
+[numthreads(numThreads, numThreads, numThreads)]
+void Texture3DToBufferCS(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= NumPointsPerAxis || id.y >= NumPointsPerAxis || id.z >= NumPointsPerAxis) 
+    {
+        return;
+    }
+
+    // Calculate 3D coordinate to 1D index
+    int index = IndexFromCoord(id.x, id.y, id.z);
+    
+    // Convert to UVW coordinates and sample from 3D texture
+    float3 uvw = CoordToUVW(int3(id));
+    float4 textureValue = InputTexture3D.SampleLevel(InputTexture3DSampler, uvw, 0);
+    
+    // Write density value to persistent buffer
+    PersistentDensityBuffer[index] = textureValue.r;  // or textureValue.a depending on texture format
+}
+
+//=============================================================================
+// Fill Triangle Args Compute Shader (for indirect drawing)
+//=============================================================================
+
+RWBuffer<uint> IndirectArgs;
+RWBuffer<uint> TriangleCounterInput;
+uint VertexCountPerInstance;
+
+[numthreads(1, 1, 1)]
+void FillTriangleArgsCS(uint3 id : SV_DispatchThreadID)
+{
+    uint actualTriangleCount = TriangleCounterInput[0];
+    IndirectArgs[0] = 3;                     // vertex count per instance (3 vertices per triangle)  
+    IndirectArgs[1] = actualTriangleCount;   // instance count (actual number of triangles)
+    IndirectArgs[2] = 0;                     // start vertex location
+    IndirectArgs[3] = 0;                     // start instance location
+}
+
+//=============================================================================
+// Character Interaction Compute Shader
+//=============================================================================
+
+[numthreads(numThreads, numThreads, numThreads)]
+void CharacterInteractionCS(uint3 id : SV_DispatchThreadID)
+{
+    // Ensure grid coordinates are within valid range
+    if (id.x >= NumPointsPerAxis || id.y >= NumPointsPerAxis || id.z >= NumPointsPerAxis) 
+    {
+        return;
+    }
+    
+    // Convert character world position to local space
+    //float3 characterWorldPos = CharacterPos / 100.0f;  // 厘米转米
+    //float3 localCharacterPos = mul(WorldToLocal, float4(CharacterPos, 1.0)).xyz;
+    float3 localCharacterPos = mul(float4(CharacterPos, 1.0), WorldToLocal).xyz;
+    
+    //localCharacterPos = localCharacterPos / 100.0f;
+    //
+    //// Calculate current grid point's local position
+    //float spacing = BoundsSize / (NumPointsPerAxis - 1);
+    //float3 gridLocalPos = Centre + id * spacing - BoundsSize / 2.0f;
+    
+    //// Calculate distance from grid point to character
+    //float distance = length(gridLocalPos - localCharacterPos);
+    //float characterRadius = CharacterCollisionRadius / 100.0f;  // 厘米转米
+    
+    //// If within character influence radius, set density to 0
+    //if (distance <= characterRadius)
+    //{
+    //    int index = IndexFromCoord(id.x, id.y, id.z);
+    //    PersistentDensityBuffer[index] *= 0.3;
+    //}
+
+    // Calculate current grid point's local position
+    float spacing = BoundsSize / (NumPointsPerAxis - 1);
+    float3 gridLocalPos = id * spacing - BoundsSize / 2.0f;
+    gridLocalPos = gridLocalPos * 100.0f;
+
+    //人物capsule尺寸：
+	float halfH = 88;
+	float R = 34;
+	
+	//p到capusle距离
+	float3 A = localCharacterPos + (halfH - R) * float3(0,0,1);
+	float3 B = localCharacterPos + (halfH - R) * float3(0,0,-1);
+	float3 AB = B - A;
+	float3 AP = gridLocalPos - A;
+	float t = dot(AP, AB) / dot(AB, AB);
+	t = max(0, min(1, t));
+
+	float3 Q = A + t * AB; // 最近点
+    float distance = length(gridLocalPos - Q);
+	//float distance = length(gridLocalPos - localCharacterPos);
+	float strength = clamp(1 - distance / CharacterCollisionRadius, 0, 1);
+    
+    int index = IndexFromCoord(id.x, id.y, id.z);
+    PersistentDensityBuffer[index] *= 1.0f - strength;
+
+}
+//----cjl end

@@ -1,0 +1,224 @@
+// VEX Code for Point Wrangle
+// 从 input1 读取 Marching Cubes 查找表数据
+// Input 0: 体素点云（来自 pointsVEX.txt，已按 LOD 划分）
+// Input 1: 查找表数据（Detail Wrangle 节点）
+// 
+// 注意：LOD 划分已在 pointsVEX.txt 中完成
+// - 高分辨率区域（LOD 0）：z < res.z / 2，voxel_scale = 2
+// - 低分辨率区域（LOD 1）：z >= res.z / 2，voxel_scale = 4
+// 每个点已包含正确的 corner_pos 和 corner_val，本节点直接使用即可
+
+// 从 input1 读取查找表数据（detail 属性）
+int regularCellClass[] = detail(1, "regularCellClass");
+int regularCellData[] = detail(1, "regularCellData");
+int regularVertexData[] = detail(1, "regularVertexData");
+
+// 线性插值计算交点（与computeTrianglesForVoxel中的插值方式完全一致）
+vector VertexLerp(float isolevel; vector p1, p2; float val1, val2) {
+    if (abs(isolevel - val1) < 0.00001) return p1;
+    if (abs(isolevel - val2) < 0.00001) return p2;
+    if (abs(val1 - val2) < 0.00001) return p1;
+
+    float t;
+    if (abs(isolevel) < 0.00001) {
+        t = val2 / (val2 - val1);
+        return p1 * t + p2 * (1.0 - t);
+    } else {
+        t = (isolevel - val1) / (val2 - val1);
+    return lerp(p1, p2, t);
+    }
+}
+
+// 计算梯度（法线方向）- 基于论文中的方法
+// 使用中心差分法计算密度场的梯度
+// 注意：需要确保 Input 0 连接了 volume 数据才能使用 volumesample
+// 如果无法访问 volume，此函数会返回默认法线，代码会自动回退到简单Z轴偏移
+vector ComputeGradient(vector pos; vector voxel_size) {
+    // 检查是否可以访问 volume（通过尝试采样）
+    float test_val = volumesample(0, "density", pos);
+    if (test_val == 0.0 && length(pos) > 1000000.0) {
+        // 如果采样失败，返回默认法线（将使用简单Z轴偏移）
+        return set(0, 0, 1);
+    }
+    
+    float eps = min(voxel_size.x, min(voxel_size.y, voxel_size.z)) * 0.5;
+    
+   
+    float val_xp = volumesample(2, "density", pos + set(eps, 0, 0));
+    float val_xn = volumesample(2, "density", pos - set(eps, 0, 0));
+    float val_yp = volumesample(2, "density", pos + set(0, eps, 0));
+    float val_yn = volumesample(2, "density", pos - set(0, eps, 0));
+    float val_zp = volumesample(2, "density", pos + set(0, 0, eps));
+    float val_zn = volumesample(2, "density", pos - set(0, 0, eps));
+    
+    vector grad;
+    grad.x = (val_xp - val_xn) / (2.0 * eps);
+    grad.y = (val_yp - val_yn) / (2.0 * eps);
+    grad.z = (val_zp - val_zn) / (2.0 * eps);
+    
+    // 归一化梯度得到法线方向
+    float len = length(grad);
+    if (len > 0.00001) {
+        return normalize(grad);
+    }
+    return set(0, 0, 1);  // 默认法线
+}
+
+// 将偏移向量投影到切平面（垂直于法线的平面）
+// 基于论文中的"Projection of transition cell vertices onto the tangent plane"
+vector ProjectToTangentPlane(vector offset; vector normal) {
+    // 投影公式：projected = offset - dot(offset, normal) * normal
+    float dot_product = dot(offset, normal);
+    return offset - dot_product * normal;
+}
+
+// --- 主函数 ---
+float isolevel = chf("isolevel"); // 从通道获取isolevel
+vector voxel_size = point(0, "voxel_size", @ptnum);
+vector min_bound = point(0, "min_bound", @ptnum);
+int voxel_scale = point(0, "voxel_scale", @ptnum);
+int is_boundary_lowres = point(0, "is_boundary_lowres", @ptnum);
+
+// 角点索引映射（与computeTrianglesForVoxel中的cornerOffsets对应）
+// computeTrianglesForVoxel使用的角点顺序：
+// [0] = (x-voxelScale, y-voxelScale, z-voxelScale)
+// [1] = (x, y-voxelScale, z-voxelScale)
+// [2] = (x-voxelScale, y, z-voxelScale)
+// [3] = (x, y, z-voxelScale)
+// [4] = (x-voxelScale, y-voxelScale, z)
+// [5] = (x, y-voxelScale, z)
+// [6] = (x-voxelScale, y, z)
+// [7] = (x, y, z)
+// 需要转换为VEX中的角点顺序
+
+
+
+// 读取当前点的体素信息（仅用于调试/一致性；算法只依赖corner_pos/corner_val）
+int x = point(0, "voxel_x", @ptnum);
+int y = point(0, "voxel_y", @ptnum);
+int z = point(0, "voxel_z", @ptnum);
+
+// 从点属性读取角点位置和密度值（使用数组属性）
+vector corner_pos[] = point(0, "corner_pos", @ptnum);
+float corner_val[] = point(0, "corner_val", @ptnum);
+            
+// 检查数组是否有效
+if (len(corner_pos) < 8 || len(corner_val) < 8) {
+    @group_del = 1;  // 标记删除无效点
+    return;  // 数组属性无效，跳过
+            }
+
+// 计算 cube index（与computeTrianglesForVoxel相同）
+            int cube_index = 0;
+if (corner_val[0] <= isolevel) cube_index |= 1;
+if (corner_val[1] <= isolevel) cube_index |= 2;
+if (corner_val[2] <= isolevel) cube_index |= 4;
+if (corner_val[3] <= isolevel) cube_index |= 8;
+if (corner_val[4] <= isolevel) cube_index |= 16;
+if (corner_val[5] <= isolevel) cube_index |= 32;
+if (corner_val[6] <= isolevel) cube_index |= 64;
+if (corner_val[7] <= isolevel) cube_index |= 128;
+
+            // 如果体素完全在内部或外部，则跳过
+if (cube_index == 0 || cube_index == 255) {
+    @group_del = 1;  // 标记删除不需要的点
+    return;
+}
+
+// 使用修改后的Marching Cubes算法
+int cell_class = regularCellClass[cube_index];
+
+// 内联获取顶点数和三角形数（VEX函数无法访问全局数组）
+int baseIndex = cell_class * 16;
+int geometryCounts = regularCellData[baseIndex];
+int vertex_count = (geometryCounts / 16) & 0x0F;  // 顶点数
+int triangle_count = geometryCounts & 0x0F;       // 三角形数
+
+if (vertex_count == 0) {
+    @group_del = 1;  // 标记删除没有顶点的点
+    return;
+}
+
+// 获取该情况的顶点数据（从regularVertexData中读取）
+// regularVertexData数组索引: cube_index * 12 + vertex_index
+// 每个顶点数据是16位值: 低字节 = (corner1 << 4) | corner2
+
+// 计算边上的顶点位置
+vector edge_vertices[];
+resize(edge_vertices, vertex_count);
+
+for (int i = 0; i < vertex_count; ++i) {
+    // 从regularVertexData数组获取顶点数据
+    // 数组索引: regularVertexData[cube_index * 12 + i]
+    int vertex_data_index = cube_index * 12 + i;
+    int vertex_data = regularVertexData[vertex_data_index];
+    
+    if (vertex_data == 0) break;  // 没有更多顶点
+    
+    // 内联提取角点索引（VEX函数无法访问全局数组）
+    int c1 = (vertex_data / 16) & 0x0F;  // 高4位 = corner1
+    int c2 = vertex_data & 0x0F;         // 低4位 = corner2
+    
+    // 与 C++ computeTrianglesForTransvoxel 中的"normal cell half-thickness"一致：
+    // 在边界处的 low-res regular cell，需要沿 transvoxel 轴（这里固定为 -Z）把底面角点(0..3)抬高 voxelScale*0.5
+    // 改进：使用切平面投影减少几何变形（基于论文 Figure 4.12）
+    // 注意：只改位置，不改 corner_val（corner_val 应该来自原始网格采样）
+    vector p1 = corner_pos[c1];
+    vector p2 = corner_pos[c2];
+    
+    if (is_boundary_lowres == 1) {
+        // Negative z axis: corner < 4 属于底面
+        float offset_amount = voxel_scale * voxel_size.z * 0.5;
+        vector z_offset = set(0, 0, offset_amount);
+        
+        if (c1 < 4) {
+            // 计算角点的法线（梯度方向）
+            vector normal1 = ComputeGradient(p1, voxel_size);
+            // 将Z轴偏移投影到切平面（减少几何变形）
+            // 如果法线无效，ProjectToTangentPlane 会返回接近原始偏移的值
+            vector projected_offset1 = ProjectToTangentPlane(z_offset, normal1);
+            p1 += projected_offset1;
+        }
+        if (c2 < 4) {
+            // 同样的切平面投影
+            vector normal2 = ComputeGradient(p2, voxel_size);
+            vector projected_offset2 = ProjectToTangentPlane(z_offset, normal2);
+            p2 += projected_offset2;
+        }
+    }
+
+    // 使用与computeTrianglesForVoxel相同的插值公式
+    vector vertex_pos = VertexLerp(isolevel, p1, p2, corner_val[c1], corner_val[c2]);
+    edge_vertices[i] = vertex_pos;
+}
+
+// 根据cellData创建三角形
+int cell_data_base = cell_class * 16 + 1;  // 跳过geometryCounts
+for (int i = 0; i < triangle_count * 3; i += 3) {
+    int idx0 = regularCellData[cell_data_base + i];
+    int idx1 = regularCellData[cell_data_base + i + 1];
+    int idx2 = regularCellData[cell_data_base + i + 2];
+    
+    if (idx0 < 0 || idx1 < 0 || idx2 < 0) break;
+    
+    if (idx0 >= len(edge_vertices) || idx1 >= len(edge_vertices) || idx2 >= len(edge_vertices)) {
+        continue;  // 索引越界，跳过
+    }
+
+    int p0_idx = addpoint(0, edge_vertices[idx0]);
+    int p1_idx = addpoint(0, edge_vertices[idx1]);
+    int p2_idx = addpoint(0, edge_vertices[idx2]);
+    int prim = addprim(0, "poly", p0_idx, p1_idx, p2_idx);
+    
+    // 如果是 boundary_lowres_tris，在顶点属性上设置为绿色
+    if (is_boundary_lowres == 1) {
+        setpointattrib(0, "Cd", p0_idx, set(0, 1, 0));  // 绿色
+        setpointattrib(0, "Cd", p1_idx, set(0, 1, 0));  // 绿色
+        setpointattrib(0, "Cd", p2_idx, set(0, 1, 0));  // 绿色
+    }
+}
+
+// 标记删除当前点阵点（三角形已生成，不再需要原始点）
+// 注意：在 Point Wrangle 中直接 removepoint 可能不会立即生效
+// 建议在后续添加 Blast 节点，Group 设为 "del"，Delete Non-Selected 设为 "Selected"
+@group_del = 1;

@@ -1,0 +1,355 @@
+// VEX Code for Detail Wrangle - 生成体素点阵
+
+
+// --- 主函数 ---
+// Input 0: volume (体素数据)
+// Input 1: bound (边界框几何体)
+//float isolevel = chf("isolevel"); // 从通道获取isolevel
+vector res = volumeres(0, "density");  // 从 input 0 读取 volume 分辨率
+vector min_bound, max_bound;
+getbbox(1, min_bound, max_bound);  // 从 input 1 获取边界框
+vector voxel_size = (max_bound - min_bound) / (res - 1);
+
+// 角点索引映射（与computeTrianglesForVoxel中的cornerOffsets对应）
+// computeTrianglesForVoxel使用的角点顺序：
+// [0] = (x-voxelScale, y-voxelScale, z-voxelScale)
+// [1] = (x, y-voxelScale, z-voxelScale)
+// [2] = (x-voxelScale, y, z-voxelScale)
+// [3] = (x, y, z-voxelScale)
+// [4] = (x-voxelScale, y-voxelScale, z)
+// [5] = (x, y-voxelScale, z)
+// [6] = (x-voxelScale, y, z)
+// [7] = (x, y, z)
+// 需要转换为VEX中的角点顺序
+
+// LOD 划分：根据 Z 轴分为两个区域
+// 高分辨率区域（LOD 0）：z < res.z / 2，使用 voxelScale = 2
+// 低分辨率区域（LOD 1）：z >= res.z / 2，使用 voxelScale = 4
+int voxel_scale_lod0 = 2;  // 高分辨率步长
+int voxel_scale_lod1 = 4;  // 低分辨率步长
+int lod_boundary = (int)(res.z / 2);  // LOD 分界线
+
+// 高分辨率区域（LOD 0）：z < res.z / 2 - voxel_scale_lod0
+for (int z = voxel_scale_lod0; z < lod_boundary - voxel_scale_lod0; z += voxel_scale_lod0) {
+    for (int y = voxel_scale_lod0; y < res.y - 1; y += voxel_scale_lod0) {
+        for (int x = voxel_scale_lod0; x < res.x - 1; x += voxel_scale_lod0) {
+            int voxel_scale = voxel_scale_lod0;
+
+            // 8个角的位置和密度值（使用与computeTrianglesForVoxel相同的角点顺序）
+            vector corner_pos[];
+            float corner_val[];
+            resize(corner_pos, 8);
+            resize(corner_val, 8);
+            
+            // 在C++中，x, y, z是体素中心坐标（整数），voxelScale是体素大小的一半
+            // 在VEX中，x, y, z是体素网格索引（整数）
+            // 根据cornerOffsets定义，角点顺序为：
+            // [0] = (-1, -1, -1) 相对于体素中心
+            // [1] = (0, -1, -1)
+            // [2] = (-1, 0, -1)
+            // [3] = (0, 0, -1)
+            // [4] = (-1, -1, 0)
+            // [5] = (0, -1, 0)
+            // [6] = (-1, 0, 0)
+            // [7] = (0, 0, 0)
+            
+            // 关键：对齐 C++ 坐标语义
+            // C++ 的 (x, y, z) 代表 cell 的“正角点/最大角”(upper corner)，不是中心点
+            // 所以角点应落在整数网格点：world = min_bound + grid * voxel_size（不能 +0.5）
+            // 这里点的位置仅用于可视化，取 cell 中心
+            vector voxel_center = min_bound + (set(x, y, z) - set(voxel_scale, voxel_scale, voxel_scale) * 0.5) * voxel_size;
+            
+            // 8 个角点位置（严格按 computeTrianglesForVoxel 的 cornerPositions 顺序）
+            corner_pos[0] = min_bound + set(x - voxel_scale, y - voxel_scale, z - voxel_scale) * voxel_size;
+            corner_pos[1] = min_bound + set(x,              y - voxel_scale, z - voxel_scale) * voxel_size;
+            corner_pos[2] = min_bound + set(x - voxel_scale, y,              z - voxel_scale) * voxel_size;
+            corner_pos[3] = min_bound + set(x,              y,              z - voxel_scale) * voxel_size;
+            corner_pos[4] = min_bound + set(x - voxel_scale, y - voxel_scale, z) * voxel_size;
+            corner_pos[5] = min_bound + set(x,              y - voxel_scale, z) * voxel_size;
+            corner_pos[6] = min_bound + set(x - voxel_scale, y,              z) * voxel_size;
+            corner_pos[7] = min_bound + set(x,              y,              z) * voxel_size;
+            
+            // 采样8个角点的密度值（与corner_pos的顺序完全对应）
+            // 从 input 0 的 volume 采样
+            corner_val[0] = volumesample(0, "density", corner_pos[0]);
+            corner_val[1] = volumesample(0, "density", corner_pos[1]);
+            corner_val[2] = volumesample(0, "density", corner_pos[2]);
+            corner_val[3] = volumesample(0, "density", corner_pos[3]);
+            corner_val[4] = volumesample(0, "density", corner_pos[4]);
+            corner_val[5] = volumesample(0, "density", corner_pos[5]);
+            corner_val[6] = volumesample(0, "density", corner_pos[6]);
+            corner_val[7] = volumesample(0, "density", corner_pos[7]);
+            
+            // 创建点，位置在体素中心
+            int pt = addpoint(0, voxel_center);
+            
+            // 存储体素的网格索引（用于第二个wrangle重新计算角点）
+            setpointattrib(0, "voxel_x", pt, x);
+            setpointattrib(0, "voxel_y", pt, y);
+            setpointattrib(0, "voxel_z", pt, z);
+            
+            // 存储体素大小和边界信息（用于第二个wrangle）
+            setpointattrib(0, "voxel_size", pt, voxel_size);
+            setpointattrib(0, "min_bound", pt, min_bound);
+            setpointattrib(0, "voxel_scale", pt, voxel_scale);  // 存储 LOD 缩放因子
+            
+            // 存储8个角点的密度值与位置（使用数组属性）
+            // corner_val: float[8]，corner_pos: vector[8]
+            setpointattrib(0, "corner_val", pt, corner_val);
+            setpointattrib(0, "corner_pos", pt, corner_pos);
+            
+            // 计算体素中心的密度值用于颜色可视化
+            // 从 input 0 的 volume 采样
+            float center_density = volumesample(0, "density", voxel_center);
+            
+            // 将density值映射到颜色（使用ramp或简单的颜色映射）
+            vector color = set(center_density, center_density, center_density);
+             
+            
+            // 设置颜色属性
+            setpointattrib(0, "Cd", pt, color);
+
+        }
+    }
+}
+
+// 边界区域（Transition Cell）：z = lod_boundary（仅一层）
+// 使用 transition cell 的 13 个角点（前 9 个是高分辨率面，后 4 个是低分辨率面）
+// 只生成一层，直接使用 lod_boundary
+for (int y = voxel_scale_lod1; y < res.y - 1; y += voxel_scale_lod1) {
+    for (int x = voxel_scale_lod1; x < res.x - 1; x += voxel_scale_lod1) {
+        int z = lod_boundary;  // 只生成一层
+        int voxel_scale = voxel_scale_lod1;  // 使用低分辨率的 voxelScale
+
+        // Transition cell 有 13 个角点
+        // 前 9 个：高分辨率面的角点（z = z - voxelScale）
+        // 后 4 个：低分辨率面的角点（在 C++ 里初始也在 z - voxelScale，之后在 transvoxelVEX 中对 corner>=9 做 +voxelScale*0.5 的轴向偏移）
+        vector trans_corner_pos[];
+        float trans_corner_val[];
+        resize(trans_corner_pos, 13);
+        resize(trans_corner_val, 13);
+        
+        // 点的位置仅用于可视化，取 cell 中心
+        vector voxel_center = min_bound + (set(x, y, z) - set(voxel_scale, voxel_scale, voxel_scale) * 0.5) * voxel_size;
+        
+        // 根据 C++ 代码，所有 13 个角点的 Z 坐标都是 z-voxelScale（高分辨率面）
+        // 角点的 X、Y 坐标定义如下（相对于体素中心 x, y）：
+        // 角点 0-8: 高分辨率面的 3x3 网格
+        // 角点 9-12: 低分辨率面的 4 个角点（但 Z 坐标也是 z-voxelScale）
+        int z_high = z - voxel_scale;  // 高分辨率面的 Z 坐标（网格坐标）
+        
+        // 计算高分辨率面的体素中心位置
+        // 注意：transition cell 的高分辨率面应该与边界处的高分辨率体素对齐
+        // 使用与普通体素相同的角点计算方式
+        vector half_voxel_high = voxel_size * voxel_scale_lod0 * 0.5;  // 高分辨率使用 lod0 的 scale
+        
+        // 根据 C++ 代码，transition cell 的角点位置定义如下：
+        // transCornerPositions[i] = (x, y, z) 其中 x, y, z 是网格坐标
+        // 角点 0-8 位于高分辨率面 (z = z - voxelScale)
+        // 角点位置使用网格坐标：x-voxelScale, x-voxelScale/2, x 等
+        // 转换为世界坐标时，需要与普通体素的角点计算方式保持一致
+        // 角点必须落在整数网格点：world = min_bound + grid_pos * voxel_size
+        
+        // 角点 0: (x-voxelScale, y-voxelScale, z-voxelScale)
+        // 网格坐标：(x - voxel_scale, y - voxel_scale, z_high)
+        // 转换为世界坐标：min_bound + grid_pos * voxel_size
+        vector pos0_grid = set(x - voxel_scale, y - voxel_scale, z_high);
+        trans_corner_pos[0] = min_bound + pos0_grid * voxel_size;
+        
+        // 角点 1: (x-voxelScale/2, y-voxelScale, z-voxelScale)
+        vector pos1_grid = set(x - voxel_scale/2, y - voxel_scale, z_high);
+        trans_corner_pos[1] = min_bound + pos1_grid * voxel_size;
+        
+        // 角点 2: (x, y-voxelScale, z-voxelScale)
+        vector pos2_grid = set(x, y - voxel_scale, z_high);
+        trans_corner_pos[2] = min_bound + pos2_grid * voxel_size;
+        
+        // 角点 3: (x-voxelScale, y-voxelScale/2, z-voxelScale)
+        vector pos3_grid = set(x - voxel_scale, y - voxel_scale/2, z_high);
+        trans_corner_pos[3] = min_bound + pos3_grid * voxel_size;
+        
+        // 角点 4: (x-voxelScale/2, y-voxelScale/2, z-voxelScale)
+        vector pos4_grid = set(x - voxel_scale/2, y - voxel_scale/2, z_high);
+        trans_corner_pos[4] = min_bound + pos4_grid * voxel_size;
+        
+        // 角点 5: (x, y-voxelScale/2, z-voxelScale)
+        vector pos5_grid = set(x, y - voxel_scale/2, z_high);
+        trans_corner_pos[5] = min_bound + pos5_grid * voxel_size;
+        
+        // 角点 6: (x-voxelScale, y, z-voxelScale)
+        vector pos6_grid = set(x - voxel_scale, y, z_high);
+        trans_corner_pos[6] = min_bound + pos6_grid * voxel_size;
+        
+        // 角点 7: (x-voxelScale/2, y, z-voxelScale)
+        vector pos7_grid = set(x - voxel_scale/2, y, z_high);
+        trans_corner_pos[7] = min_bound + pos7_grid * voxel_size;
+        
+        // 角点 8: (x, y, z-voxelScale)
+        vector pos8_grid = set(x, y, z_high);
+        trans_corner_pos[8] = min_bound + pos8_grid * voxel_size;
+        
+        // 角点 9-12：低分辨率面的 4 个角点
+        // 注意：根据 C++ 代码，这些角点的初始 Z 坐标也是 z-voxelScale（与高分辨率面相同）
+        // 但在 transvoxelVEX.txt 中会调整 Z 坐标（corner >= 9 时，Z += voxelScale * 0.5）
+        // 角点 9: (x-voxelScale, y-voxelScale, z-voxelScale) - 与角点 0 相同
+        trans_corner_pos[9] = trans_corner_pos[0];
+        // 角点 10: (x, y-voxelScale, z-voxelScale) - 与角点 2 相同
+        trans_corner_pos[10] = trans_corner_pos[2];
+        // 角点 11: (x-voxelScale, y, z-voxelScale) - 与角点 6 相同
+        trans_corner_pos[11] = trans_corner_pos[6];
+        // 角点 12: (x, y, z-voxelScale) - 与角点 8 相同
+        trans_corner_pos[12] = trans_corner_pos[8];
+        
+        // 采样 13 个角点的密度值
+        for (int i = 0; i < 13; ++i) {
+            trans_corner_val[i] = volumesample(0, "density", trans_corner_pos[i]);
+        }
+        
+        // 创建点，位置在体素中心
+        int pt = addpoint(0, voxel_center);
+        
+        // 存储体素的网格索引
+        setpointattrib(0, "voxel_x", pt, x);
+        setpointattrib(0, "voxel_y", pt, y);
+        setpointattrib(0, "voxel_z", pt, z);
+        
+        // 存储体素大小和边界信息
+        setpointattrib(0, "voxel_size", pt, voxel_size);
+        setpointattrib(0, "min_bound", pt, min_bound);
+        setpointattrib(0, "voxel_scale", pt, voxel_scale);
+        setpointattrib(0, "is_transition", pt, 1);  // 标记为 transition cell
+        
+        // 存储 13 个角点的密度值与位置
+        setpointattrib(0, "trans_corner_val", pt, trans_corner_val);
+        setpointattrib(0, "trans_corner_pos", pt, trans_corner_pos);
+        
+        // 计算体素中心的密度值用于颜色可视化
+        float center_density = volumesample(0, "density", voxel_center);
+        vector color = set(center_density, center_density, center_density);
+        setpointattrib(0, "Cd", pt, color);
+    }
+}
+
+// 低分辨率边界 regular cell（用于补齐 transition cell 与低分辨率区域之间的空隙）
+// 对应 C++ 中 computeTrianglesForTransvoxel(scene, x, y, z=VOLUME_SIZE/2) 里"normal cell half-thickness"那一部分
+// 这里先生成完整的 low-res cell (范围 z-voxelScale .. z)，在 marchCubeVEX 中再对底面 corner(0..3) 做 +voxelScale*0.5 的 Z 偏移，使其变成半厚度
+// z = lod_boundary（仅一层）
+for (int y = voxel_scale_lod1; y < res.y - 1; y += voxel_scale_lod1) {
+    for (int x = voxel_scale_lod1; x < res.x - 1; x += voxel_scale_lod1) {
+        int z = lod_boundary;  // 只生成一层
+        int voxel_scale = voxel_scale_lod1;
+
+        // 8个角的位置和密度值（与computeTrianglesForVoxel相同的角点顺序）
+        vector corner_pos[];
+        float corner_val[];
+        resize(corner_pos, 8);
+        resize(corner_val, 8);
+
+        // 点的位置仅用于可视化，取 cell 中心（对齐 C++ 语义：x,y,z 为 upper corner）
+        vector voxel_center = min_bound + (set(x, y, z) - set(voxel_scale, voxel_scale, voxel_scale) * 0.5) * voxel_size;
+
+        // 角点落在整数网格点：world = min_bound + grid * voxel_size
+        corner_pos[0] = min_bound + set(x - voxel_scale, y - voxel_scale, z - voxel_scale) * voxel_size;
+        corner_pos[1] = min_bound + set(x,              y - voxel_scale, z - voxel_scale) * voxel_size;
+        corner_pos[2] = min_bound + set(x - voxel_scale, y,              z - voxel_scale) * voxel_size;
+        corner_pos[3] = min_bound + set(x,              y,              z - voxel_scale) * voxel_size;
+        corner_pos[4] = min_bound + set(x - voxel_scale, y - voxel_scale, z) * voxel_size;
+        corner_pos[5] = min_bound + set(x,              y - voxel_scale, z) * voxel_size;
+        corner_pos[6] = min_bound + set(x - voxel_scale, y,              z) * voxel_size;
+        corner_pos[7] = min_bound + set(x,              y,              z) * voxel_size;
+
+        // 采样8个角点的密度值（使用原始角点位置采样，后续在 marchCubeVEX 中只改位置不改密度，保持与 C++ 一致）
+        for (int i = 0; i < 8; ++i) {
+            corner_val[i] = volumesample(0, "density", corner_pos[i]);
+        }
+
+        int pt = addpoint(0, voxel_center);
+        setpointattrib(0, "voxel_x", pt, x);
+        setpointattrib(0, "voxel_y", pt, y);
+        setpointattrib(0, "voxel_z", pt, z);
+        setpointattrib(0, "voxel_size", pt, voxel_size);
+        setpointattrib(0, "min_bound", pt, min_bound);
+        setpointattrib(0, "voxel_scale", pt, voxel_scale);
+
+        // 标记：这是边界处的 low-res regular cell，需要在 marchCubeVEX 做半厚度缩放
+        setpointattrib(0, "is_boundary_lowres", pt, 1);
+
+        setpointattrib(0, "corner_val", pt, corner_val);
+        setpointattrib(0, "corner_pos", pt, corner_pos);
+
+        float center_density = volumesample(0, "density", voxel_center);
+        vector color = set(center_density, center_density, center_density);
+        setpointattrib(0, "Cd", pt, color);
+    }
+}
+
+// 低分辨率区域（LOD 1）：z >= res.z / 2 + voxel_scale_lod1（跳过 transition cell 区域）
+// 与 C++ 代码一致：从 VOLUME_SIZE / 2 + voxelScale 开始
+for (int z = lod_boundary + voxel_scale_lod1; z < res.z - 1; z += voxel_scale_lod1) {
+    for (int y = voxel_scale_lod1; y < res.y - 1; y += voxel_scale_lod1) {
+        for (int x = voxel_scale_lod1; x < res.x - 1; x += voxel_scale_lod1) {
+            int voxel_scale = voxel_scale_lod1;
+
+            // 8个角的位置和密度值（使用与computeTrianglesForVoxel相同的角点顺序）
+            vector corner_pos[];
+            float corner_val[];
+            resize(corner_pos, 8);
+            resize(corner_val, 8);
+            
+            // 关键：对齐 C++ 坐标语义（low-res 区域同样如此）
+            vector voxel_center = min_bound + (set(x, y, z) - set(voxel_scale, voxel_scale, voxel_scale) * 0.5) * voxel_size;
+            
+            corner_pos[0] = min_bound + set(x - voxel_scale, y - voxel_scale, z - voxel_scale) * voxel_size;
+            corner_pos[1] = min_bound + set(x,              y - voxel_scale, z - voxel_scale) * voxel_size;
+            corner_pos[2] = min_bound + set(x - voxel_scale, y,              z - voxel_scale) * voxel_size;
+            corner_pos[3] = min_bound + set(x,              y,              z - voxel_scale) * voxel_size;
+            corner_pos[4] = min_bound + set(x - voxel_scale, y - voxel_scale, z) * voxel_size;
+            corner_pos[5] = min_bound + set(x,              y - voxel_scale, z) * voxel_size;
+            corner_pos[6] = min_bound + set(x - voxel_scale, y,              z) * voxel_size;
+            corner_pos[7] = min_bound + set(x,              y,              z) * voxel_size;
+            
+            // 采样8个角点的密度值（与corner_pos的顺序完全对应）
+            // 从 input 0 的 volume 采样
+            corner_val[0] = volumesample(0, "density", corner_pos[0]);
+            corner_val[1] = volumesample(0, "density", corner_pos[1]);
+            corner_val[2] = volumesample(0, "density", corner_pos[2]);
+            corner_val[3] = volumesample(0, "density", corner_pos[3]);
+            corner_val[4] = volumesample(0, "density", corner_pos[4]);
+            corner_val[5] = volumesample(0, "density", corner_pos[5]);
+            corner_val[6] = volumesample(0, "density", corner_pos[6]);
+            corner_val[7] = volumesample(0, "density", corner_pos[7]);
+            
+            // 创建点，位置在体素中心
+            int pt = addpoint(0, voxel_center);
+            
+            // 存储体素的网格索引（用于第二个wrangle重新计算角点）
+            setpointattrib(0, "voxel_x", pt, x);
+            setpointattrib(0, "voxel_y", pt, y);
+            setpointattrib(0, "voxel_z", pt, z);
+            
+            // 存储体素大小和边界信息（用于第二个wrangle）
+            setpointattrib(0, "voxel_size", pt, voxel_size);
+            setpointattrib(0, "min_bound", pt, min_bound);
+            setpointattrib(0, "voxel_scale", pt, voxel_scale);  // 存储 LOD 缩放因子
+            // 非边界 low-res
+            setpointattrib(0, "is_boundary_lowres", pt, 0);
+            
+            // 存储8个角点的密度值与位置（使用数组属性）
+            // corner_val: float[8]，corner_pos: vector[8]
+            setpointattrib(0, "corner_val", pt, corner_val);
+            setpointattrib(0, "corner_pos", pt, corner_pos);
+            
+            // 计算体素中心的密度值用于颜色可视化
+            // 从 input 0 的 volume 采样
+            float center_density = volumesample(0, "density", voxel_center);
+            
+            // 将density值映射到颜色（使用ramp或简单的颜色映射）
+            vector color = set(center_density, center_density, center_density);
+             
+            
+            // 设置颜色属性
+            setpointattrib(0, "Cd", pt, color);
+
+        }
+    }
+}

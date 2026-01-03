@@ -1,0 +1,135 @@
+// VEX Code for Detail Wrangle - 根据 chunkID 生成 chunk 体素点阵
+// 
+// 重要：此代码必须在 Detail Wrangle 节点中使用！
+// 
+// 功能说明：
+// - 根据输入的 chunkID (x, y, z) 创建 chunk
+// - 每个 chunk 大小：16m x 16m x 16m
+// - 每个 chunk 划分为 32x32x32 个体素格
+// - 每个体素格以位于体素中心的一个 point 表示
+// - 总共生成 32,768 个点（32^3）
+// - Input 1: fog VDB volume（用于采样密度值）
+//
+// 使用方法：
+// 1. 在 Houdini 中创建一个 Detail Wrangle 节点
+// 2. 将 fog VDB 连接到 Input 1
+// 3. 将此代码复制到 VEXpression 中
+// 4. 在参数面板设置 chunk_x, chunk_y, chunk_z 值
+//
+// 注意：
+// - 如果看不到点，检查视图范围，点会在原点 (0,0,0) 附近
+// - 可以通过修改 chunkID 来移动 chunk 的位置
+// - 查看控制台输出确认代码是否执行
+
+// --- 参数设置 ---
+// Chunk 尺寸（米）
+float chunk_size = 16.0;  // 每个 chunk 的尺寸（16m x 16m x 16m）
+
+// 体素分辨率
+int voxel_res = 32;  // 每个 chunk 划分为 32x32x32 个体素
+
+// 体素大小（米）
+float voxel_size = chunk_size / voxel_res;  // 16.0 / 32 = 0.5m
+
+// --- 获取 chunkID ---
+// 从通道参数获取整数
+// 注意：需要在 Houdini 节点的参数面板中添加整数参数 "chunk_x", "chunk_y", "chunk_z"
+int chunk_x = chi("chunk_x");
+int chunk_y = chi("chunk_y");
+int chunk_z = chi("chunk_z");
+
+// --- 计算 chunk 的世界坐标起始位置 ---
+// Chunk 的起始位置 = chunkID * chunk_size
+vector chunk_origin = set(chunk_x * chunk_size, chunk_y * chunk_size, chunk_z * chunk_size);
+// min_bound 用于与 pointsVEX 保持一致（对于 chunk 来说，min_bound = chunk_origin）
+vector min_bound = chunk_origin;
+
+// voxel_scale 用于与 pointsVEX 保持一致（对于普通 chunk，设为 1）
+int voxel_scale = 1;
+
+// --- 生成体素点阵 ---
+// 遍历 32x32x32 个体素格，每个体素格在中心位置创建一个点
+for (int z = 0; z < voxel_res; z++) {
+    for (int y = 0; y < voxel_res; y++) {
+        for (int x = 0; x < voxel_res; x++) {
+            // 计算体素中心的位置（世界坐标）
+            // 体素中心位置 = chunk_origin + (voxel_index + 0.5) * voxel_size
+            vector local_pos = set((x + 0.5) * voxel_size, 
+                                   (y + 0.5) * voxel_size, 
+                                   (z + 0.5) * voxel_size);
+            vector voxel_center = chunk_origin + local_pos;
+            
+            // 计算8个角点的位置（与 pointsVEX 中的角点顺序一致）
+            // 角点顺序：
+            // [0] = (x-1, y-1, z-1) 相对于体素索引
+            // [1] = (x, y-1, z-1)
+            // [2] = (x-1, y, z-1)
+            // [3] = (x, y, z-1)
+            // [4] = (x-1, y-1, z)
+            // [5] = (x, y-1, z)
+            // [6] = (x-1, y, z)
+            // [7] = (x, y, z)
+            vector corner_pos[];
+            float corner_val[];
+            resize(corner_pos, 8);
+            resize(corner_val, 8);
+            
+            // 计算8个角点的世界坐标位置
+            // 角点位置 = chunk_origin + corner_index * voxel_size
+            corner_pos[0] = chunk_origin + set((x - 0.5) * voxel_size, (y - 0.5) * voxel_size, (z - 0.5) * voxel_size);
+            corner_pos[1] = chunk_origin + set((x + 0.5) * voxel_size, (y - 0.5) * voxel_size, (z - 0.5) * voxel_size);
+            corner_pos[2] = chunk_origin + set((x - 0.5) * voxel_size, (y + 0.5) * voxel_size, (z - 0.5) * voxel_size);
+            corner_pos[3] = chunk_origin + set((x + 0.5) * voxel_size, (y + 0.5) * voxel_size, (z - 0.5) * voxel_size);
+            corner_pos[4] = chunk_origin + set((x - 0.5) * voxel_size, (y - 0.5) * voxel_size, (z + 0.5) * voxel_size);
+            corner_pos[5] = chunk_origin + set((x + 0.5) * voxel_size, (y - 0.5) * voxel_size, (z + 0.5) * voxel_size);
+            corner_pos[6] = chunk_origin + set((x - 0.5) * voxel_size, (y + 0.5) * voxel_size, (z + 0.5) * voxel_size);
+            corner_pos[7] = chunk_origin + set((x + 0.5) * voxel_size, (y + 0.5) * voxel_size, (z + 0.5) * voxel_size);
+            
+            // 从 input 1 的 VDB volume 采样8个角点的密度值
+            corner_val[0] = volumesample(1, "density", corner_pos[0]);
+            corner_val[1] = volumesample(1, "density", corner_pos[1]);
+            corner_val[2] = volumesample(1, "density", corner_pos[2]);
+            corner_val[3] = volumesample(1, "density", corner_pos[3]);
+            corner_val[4] = volumesample(1, "density", corner_pos[4]);
+            corner_val[5] = volumesample(1, "density", corner_pos[5]);
+            corner_val[6] = volumesample(1, "density", corner_pos[6]);
+            corner_val[7] = volumesample(1, "density", corner_pos[7]);
+            
+            // 创建点，位置在体素中心
+            int pt = addpoint(0, voxel_center);
+            
+            // 存储体素的网格索引（与 pointsVEX 一致）
+            setpointattrib(0, "voxel_x", pt, x);
+            setpointattrib(0, "voxel_y", pt, y);
+            setpointattrib(0, "voxel_z", pt, z);
+            
+            // 存储体素大小和边界信息（与 pointsVEX 一致）
+            setpointattrib(0, "voxel_size", pt, voxel_size);
+            setpointattrib(0, "min_bound", pt, min_bound);
+            setpointattrib(0, "voxel_scale", pt, voxel_scale);
+            
+            // 存储8个角点的密度值与位置（使用数组属性，与 pointsVEX 一致）
+            // corner_val: float[8]，corner_pos: vector[8]
+            setpointattrib(0, "corner_val", pt, corner_val);
+            setpointattrib(0, "corner_pos", pt, corner_pos);
+            
+            // 存储 chunk 信息（额外属性）
+            setpointattrib(0, "chunk_x", pt, chunk_x);
+            setpointattrib(0, "chunk_y", pt, chunk_y);
+            setpointattrib(0, "chunk_z", pt, chunk_z);
+            setpointattrib(0, "chunk_size", pt, chunk_size);
+            setpointattrib(0, "chunk_origin", pt, chunk_origin);
+            
+            // 计算体素中心的密度值用于颜色可视化（从 input 1 采样）
+            float center_density = volumesample(1, "density", voxel_center);
+            vector color = set(center_density, center_density, center_density);
+            setpointattrib(0, "Cd", pt, color);
+        }
+    }
+}
+
+// 输出信息（用于调试）
+printf("生成的 chunk: (%d, %d, %d), 原点: (%.2f, %.2f, %.2f), 体素数: %d\n", 
+       chunk_x, chunk_y, chunk_z, chunk_origin.x, chunk_origin.y, chunk_origin.z, 
+       voxel_res * voxel_res * voxel_res);
+
