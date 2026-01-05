@@ -1,12 +1,19 @@
 // VEX Code for Point Wrangle
 // 从 input1 读取 Marching Cubes 查找表数据
-// Input 0: 体素点云（来自 pointsVEX.txt，已按 LOD 划分）
+// Input 0: 体素点云（来自 chunkVEX.txt 或 pointsVEX.txt）
 // Input 1: 查找表数据（Detail Wrangle 节点）
+// Input 2: fog VDB volume（用于实时采样密度值）
 // 
-// 注意：LOD 划分已在 pointsVEX.txt 中完成
-// - 高分辨率区域（LOD 0）：z < res.z / 2，voxel_scale = 2
-// - 低分辨率区域（LOD 1）：z >= res.z / 2，voxel_scale = 4
-// 每个点已包含正确的 corner_pos 和 corner_val，本节点直接使用即可
+// LOD 处理：
+// - chunkVEX 生成最高分辨率（32x32x32）的体素点
+// - 本节点根据 lodLevel 参数进行 LOD 处理：
+//   * lodLevel = 0: 使用所有体素（最高分辨率）
+//   * lodLevel = 1: 每 2 个体素采样一个（体素大小变为 2 倍）
+//   * lodLevel = 2: 每 4 个体素采样一个（体素大小变为 4 倍）
+//   * 以此类推
+// 按照 MarchingCubesCS.usf 的方式：
+// - 不存储任何角点数据
+// - corner_pos 和 corner_val 都从体素索引实时计算和采样
 
 // 从 input1 读取查找表数据（detail 属性）
 int regularCellClass[] = detail(1, "regularCellClass");
@@ -74,10 +81,40 @@ vector ProjectToTangentPlane(vector offset; vector normal) {
 
 // --- 主函数 ---
 float isolevel = chf("isolevel"); // 从通道获取isolevel
-vector voxel_size = point(0, "voxel_size", @ptnum);
+int lod_level = chi("lodLevel");  // 从通道获取 LOD 级别
+
+// 确保 lodLevel 非负
+lod_level = max(lod_level, 0);
+
+// 根据 LOD 级别计算体素缩放
+// lodLevel = 0: 使用原始体素（voxel_scale = 1）
+// lodLevel = 1: 体素大小变为 2 倍（voxel_scale = 2）
+// lodLevel = 2: 体素大小变为 4 倍（voxel_scale = 4）
+// 以此类推
+int lod_scale = (int)pow(2.0, lod_level);  // 2^lodLevel: 1, 2, 4, 8, 16, 32, ...
+
+// 读取基础体素信息
+vector base_voxel_size = point(0, "voxel_size", @ptnum);
 vector min_bound = point(0, "min_bound", @ptnum);
-int voxel_scale = point(0, "voxel_scale", @ptnum);
-int is_boundary_lowres = point(0, "is_boundary_lowres", @ptnum);
+int base_voxel_scale = point(0, "voxel_scale", @ptnum);
+
+// 根据 LOD 级别调整体素大小和缩放
+vector voxel_size = base_voxel_size * lod_scale;
+int voxel_scale = base_voxel_scale * lod_scale;
+
+// 根据 LOD 级别过滤体素：只处理符合当前 LOD 级别的体素
+// 例如，如果 lodLevel = 1，只处理 x, y, z 都是偶数的体素
+int x = point(0, "voxel_x", @ptnum);
+int y = point(0, "voxel_y", @ptnum);
+int z = point(0, "voxel_z", @ptnum);
+
+// 如果体素索引不能被 lod_scale 整除，跳过该体素
+if (lod_level > 0) {
+    if ((x % lod_scale != 0) || (y % lod_scale != 0) || (z % lod_scale != 0)) {
+        @group_del = 1;  // 标记删除不符合当前 LOD 级别的体素
+        return;
+    }
+}
 
 // 角点索引映射（与computeTrianglesForVoxel中的cornerOffsets对应）
 // computeTrianglesForVoxel使用的角点顺序：
@@ -93,20 +130,75 @@ int is_boundary_lowres = point(0, "is_boundary_lowres", @ptnum);
 
 
 
-// 读取当前点的体素信息（仅用于调试/一致性；算法只依赖corner_pos/corner_val）
-int x = point(0, "voxel_x", @ptnum);
-int y = point(0, "voxel_y", @ptnum);
-int z = point(0, "voxel_z", @ptnum);
+// 体素索引已在上面读取，用于 LOD 过滤
 
-// 从点属性读取角点位置和密度值（使用数组属性）
-vector corner_pos[] = point(0, "corner_pos", @ptnum);
-float corner_val[] = point(0, "corner_val", @ptnum);
-            
-// 检查数组是否有效
-if (len(corner_pos) < 8 || len(corner_val) < 8) {
-    @group_del = 1;  // 标记删除无效点
-    return;  // 数组属性无效，跳过
-            }
+// 按照 MarchingCubesCS.usf 的方式：从体素索引实时计算角点位置和采样密度值
+vector corner_pos[];
+float corner_val[];
+resize(corner_pos, 8);
+resize(corner_val, 8);
+
+// 角点偏移数组（与 C++ computeTrianglesForVoxel 中的角点顺序一致）
+// 角点顺序（相对于体素索引 x, y, z）：
+// [0] = (0,0,0) - 左下后角 (x, y, z)
+// [1] = (1,0,0) - 右下后角 (x+1, y, z)
+// [2] = (0,1,0) - 左上后角 (x, y+1, z)
+// [3] = (1,1,0) - 右上后角 (x+1, y+1, z)
+// [4] = (0,0,1) - 左下前角 (x, y, z+1)
+// [5] = (1,0,1) - 右下前角 (x+1, y, z+1)
+// [6] = (0,1,1) - 左上前角 (x, y+1, z+1)
+// [7] = (1,1,1) - 右上前角 (x+1, y+1, z+1)
+// 使用 vector 数组存储角点偏移（VEX 不支持二维数组初始化）
+vector corner_offsets[];
+resize(corner_offsets, 8);
+corner_offsets[0] = set(0, 0, 0);
+corner_offsets[1] = set(1, 0, 0);
+corner_offsets[2] = set(0, 1, 0);
+corner_offsets[3] = set(1, 1, 0);
+corner_offsets[4] = set(0, 0, 1);
+corner_offsets[5] = set(1, 0, 1);
+corner_offsets[6] = set(0, 1, 1);
+corner_offsets[7] = set(1, 1, 1);
+
+// 从体素索引和边界信息计算角点位置
+// 优先使用 chunk_origin（如果存在），否则使用 min_bound
+vector origin;
+if (hasattrib(0, "point", "chunk_origin")) {
+    origin = point(0, "chunk_origin", @ptnum);
+} else {
+    origin = point(0, "min_bound", @ptnum);
+}
+
+// 实时计算8个角点的世界坐标位置并从 VDB 采样密度值（与 MarchingCubesCS.usf 一致）
+// 注意：在 chunkVEX.txt 中，体素索引 x, y, z 从 0 开始（0, 1, 2, ..., 31）
+// 角点范围是 (x, y, z) 到 (x+1, y+1, z+1) 当 lodLevel = 0 时
+// 角点范围是 (x, y, z) 到 (x+lod_scale, y+lod_scale, z+lod_scale) 当 lodLevel > 0 时
+for (int i = 0; i < 8; i++) {
+    // 计算角点的网格坐标
+    // offset 是 (0,0,0) 到 (1,1,1)，表示角点在体素内的相对位置
+    vector offset = corner_offsets[i];
+    vector corner_coord;
+    
+    if (lod_level > 0) {
+        // 当 lod_level > 0 时，x, y, z 是过滤后的体素索引（如 0, 2, 4, 6...）
+        // 角点范围是 (x, y, z) 到 (x+lod_scale, y+lod_scale, z+lod_scale)
+        // 例如：体素索引 0 的角点是 (0,0,0) 到 (2,2,2)，体素索引 2 的角点是 (2,2,2) 到 (4,4,4)
+        corner_coord = set(x + offset.x * lod_scale, 
+                           y + offset.y * lod_scale, 
+                           z + offset.z * lod_scale);
+    } else {
+        // lod_level = 0，直接使用体素索引
+        // 角点范围是 (x, y, z) 到 (x+1, y+1, z+1)
+        corner_coord = set(x + offset.x, 
+                           y + offset.y, 
+                           z + offset.z);
+    }
+    corner_pos[i] = origin + set(corner_coord.x * base_voxel_size.x, 
+                                  corner_coord.y * base_voxel_size.y, 
+                                  corner_coord.z * base_voxel_size.z);
+    // 从 Input 2 的 VDB volume 实时采样密度值
+    corner_val[i] = volumesample(2, "density", corner_pos[i]);
+}
 
 // 计算 cube index（与computeTrianglesForVoxel相同）
             int cube_index = 0;
@@ -159,36 +251,8 @@ for (int i = 0; i < vertex_count; ++i) {
     int c1 = (vertex_data / 16) & 0x0F;  // 高4位 = corner1
     int c2 = vertex_data & 0x0F;         // 低4位 = corner2
     
-    // 与 C++ computeTrianglesForTransvoxel 中的"normal cell half-thickness"一致：
-    // 在边界处的 low-res regular cell，需要沿 transvoxel 轴（这里固定为 -Z）把底面角点(0..3)抬高 voxelScale*0.5
-    // 改进：使用切平面投影减少几何变形（基于论文 Figure 4.12）
-    // 注意：只改位置，不改 corner_val（corner_val 应该来自原始网格采样）
-    vector p1 = corner_pos[c1];
-    vector p2 = corner_pos[c2];
-    
-    if (is_boundary_lowres == 1) {
-        // Negative z axis: corner < 4 属于底面
-        float offset_amount = voxel_scale * voxel_size.z * 0.5;
-        vector z_offset = set(0, 0, offset_amount);
-        
-        if (c1 < 4) {
-            // 计算角点的法线（梯度方向）
-            vector normal1 = ComputeGradient(p1, voxel_size);
-            // 将Z轴偏移投影到切平面（减少几何变形）
-            // 如果法线无效，ProjectToTangentPlane 会返回接近原始偏移的值
-            vector projected_offset1 = ProjectToTangentPlane(z_offset, normal1);
-            p1 += projected_offset1;
-        }
-        if (c2 < 4) {
-            // 同样的切平面投影
-            vector normal2 = ComputeGradient(p2, voxel_size);
-            vector projected_offset2 = ProjectToTangentPlane(z_offset, normal2);
-            p2 += projected_offset2;
-        }
-    }
-
     // 使用与computeTrianglesForVoxel相同的插值公式
-    vector vertex_pos = VertexLerp(isolevel, p1, p2, corner_val[c1], corner_val[c2]);
+    vector vertex_pos = VertexLerp(isolevel, corner_pos[c1], corner_pos[c2], corner_val[c1], corner_val[c2]);
     edge_vertices[i] = vertex_pos;
 }
 
@@ -209,13 +273,6 @@ for (int i = 0; i < triangle_count * 3; i += 3) {
     int p1_idx = addpoint(0, edge_vertices[idx1]);
     int p2_idx = addpoint(0, edge_vertices[idx2]);
     int prim = addprim(0, "poly", p0_idx, p1_idx, p2_idx);
-    
-    // 如果是 boundary_lowres_tris，在顶点属性上设置为绿色
-    if (is_boundary_lowres == 1) {
-        setpointattrib(0, "Cd", p0_idx, set(0, 1, 0));  // 绿色
-        setpointattrib(0, "Cd", p1_idx, set(0, 1, 0));  // 绿色
-        setpointattrib(0, "Cd", p2_idx, set(0, 1, 0));  // 绿色
-    }
 }
 
 // 标记删除当前点阵点（三角形已生成，不再需要原始点）

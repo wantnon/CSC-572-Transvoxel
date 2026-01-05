@@ -5,22 +5,16 @@
 // 功能说明：
 // - 根据输入的 chunkID (x, y, z) 创建 chunk
 // - 每个 chunk 大小：16m x 16m x 16m
-// - 支持 LOD（Level of Detail）：
-//   * lodLevel = 0: 32x32x32 个体素，每个体素 0.5m（32,768 个点）
-//   * lodLevel = 1: 16x16x16 个体素，每个体素 1.0m（4,096 个点）
-//   * lodLevel = 2: 8x8x8 个体素，每个体素 2.0m（512 个点）
-//   * lodLevel = 3: 4x4x4 个体素，每个体素 4.0m（64 个点）
-//   * lodLevel = 4: 2x2x2 个体素，每个体素 8.0m（8 个点）
-//   * lodLevel = 5: 1x1x1 个体素，每个体素 16.0m（1 个点）
-//   * 以此类推，lodLevel 每增加 1，体素尺寸变为 2 倍，分辨率减半
+// - 始终生成最高分辨率：32x32x32 个体素，每个体素 0.5m（32,768 个点）
+// - LOD 处理将在 marchCubeVEX 中进行，而不是在 chunkVEX 中
 // - 每个体素格以位于体素中心的一个 point 表示
-// - Input 1: fog VDB volume（用于采样密度值）
+// - 按照 MarchingCubesCS.usf 的方式：不存储任何角点数据
+//   角点位置和密度值将在后续节点中从体素索引实时计算和采样
 //
 // 使用方法：
 // 1. 在 Houdini 中创建一个 Detail Wrangle 节点
-// 2. 将 fog VDB 连接到 Input 1
-// 3. 将此代码复制到 VEXpression 中
-// 4. 在参数面板设置 chunk_x, chunk_y, chunk_z 和 lodLevel 值
+// 2. 将此代码复制到 VEXpression 中
+// 3. 在参数面板设置 chunk_x, chunk_y, chunk_z 值
 //
 // 注意：
 // - 如果看不到点，检查视图范围，点会在原点 (0,0,0) 附近
@@ -31,30 +25,18 @@
 // Chunk 尺寸（米）
 float chunk_size = 16.0;  // 每个 chunk 的尺寸（16m x 16m x 16m）
 
-// 基础体素分辨率（LOD 0）
-int base_voxel_res = 32;  // 基础分辨率：32x32x32
+// 体素分辨率（固定为最高分辨率）
+int voxel_res = 32;  // 固定分辨率：32x32x32
+
+// 体素大小（米）
+float voxel_size = chunk_size / voxel_res;  // 16.0 / 32 = 0.5m
 
 // --- 获取参数 ---
 // 从通道参数获取整数
-// 注意：需要在 Houdini 节点的参数面板中添加整数参数 "chunk_x", "chunk_y", "chunk_z", "lodLevel"
+// 注意：需要在 Houdini 节点的参数面板中添加整数参数 "chunk_x", "chunk_y", "chunk_z"
 int chunk_x = chi("chunk_x");
 int chunk_y = chi("chunk_y");
 int chunk_z = chi("chunk_z");
-int lod_level = chi("lodLevel");
-
-// 确保 lodLevel 非负
-lod_level = max(lod_level, 0);
-
-// 根据 LOD 级别计算体素分辨率和大小
-// lodLevel = 0: 分辨率 32, 体素大小 0.5m
-// lodLevel = 1: 分辨率 16, 体素大小 1.0m (2倍)
-// lodLevel = 2: 分辨率 8, 体素大小 2.0m (4倍)
-// lodLevel = 3: 分辨率 4, 体素大小 4.0m (8倍)
-// lodLevel = 4: 分辨率 2, 体素大小 8.0m (16倍)
-// lodLevel = 5: 分辨率 1, 体素大小 16.0m (32倍)
-int lod_scale = (int)pow(2.0, lod_level);  // 2^lodLevel: 1, 2, 4, 8, 16, 32, ...
-int voxel_res = base_voxel_res / lod_scale;  // 32, 16, 8
-float voxel_size = (chunk_size / base_voxel_res) * lod_scale;  // 0.5m, 1.0m, 2.0m
 
 // --- 计算 chunk 的世界坐标起始位置 ---
 // Chunk 的起始位置 = chunkID * chunk_size
@@ -62,11 +44,11 @@ vector chunk_origin = set(chunk_x * chunk_size, chunk_y * chunk_size, chunk_z * 
 // min_bound 用于与 pointsVEX 保持一致（对于 chunk 来说，min_bound = chunk_origin）
 vector min_bound = chunk_origin;
 
-// voxel_scale 用于与 pointsVEX 保持一致（等于 lod_scale）
-int voxel_scale = lod_scale;
+// voxel_scale 固定为 1（最高分辨率，LOD 处理在 marchCubeVEX 中进行）
+int voxel_scale = 1;
 
 // --- 生成体素点阵 ---
-// 根据 LOD 级别遍历对应数量的体素格，每个体素格在中心位置创建一个点
+// 遍历 32x32x32 个体素格，每个体素格在中心位置创建一个点
 for (int z = 0; z < voxel_res; z++) {
     for (int y = 0; y < voxel_res; y++) {
         for (int x = 0; x < voxel_res; x++) {
@@ -77,49 +59,8 @@ for (int z = 0; z < voxel_res; z++) {
                                    (z + 0.5) * voxel_size);
             vector voxel_center = chunk_origin + local_pos;
             
-            // 计算8个角点的位置（与 pointsVEX 中的角点顺序一致）
-            // 角点顺序：
-            // [0] = (x-1, y-1, z-1) 相对于体素索引
-            // [1] = (x, y-1, z-1)
-            // [2] = (x-1, y, z-1)
-            // [3] = (x, y, z-1)
-            // [4] = (x-1, y-1, z)
-            // [5] = (x, y-1, z)
-            // [6] = (x-1, y, z)
-            // [7] = (x, y, z)
-            vector corner_pos[];
-            float corner_val[];
-            resize(corner_pos, 8);
-            resize(corner_val, 8);
-            
-            // 计算8个角点的世界坐标位置（与 pointsVEX 中的角点计算方式一致）
-            // 角点应落在整数网格点上，体素的 8 个角点分别为：
-            // corner_pos[0] = 左下后角 (x, y, z)
-            // corner_pos[1] = 右下后角 (x+1, y, z)
-            // corner_pos[2] = 左上后角 (x, y+1, z)
-            // corner_pos[3] = 右上后角 (x+1, y+1, z)
-            // corner_pos[4] = 左下前角 (x, y, z+1)
-            // corner_pos[5] = 右下前角 (x+1, y, z+1)
-            // corner_pos[6] = 左上前角 (x, y+1, z+1)
-            // corner_pos[7] = 右上前角 (x+1, y+1, z+1)
-            corner_pos[0] = chunk_origin + set(x * voxel_size, y * voxel_size, z * voxel_size);
-            corner_pos[1] = chunk_origin + set((x + 1) * voxel_size, y * voxel_size, z * voxel_size);
-            corner_pos[2] = chunk_origin + set(x * voxel_size, (y + 1) * voxel_size, z * voxel_size);
-            corner_pos[3] = chunk_origin + set((x + 1) * voxel_size, (y + 1) * voxel_size, z * voxel_size);
-            corner_pos[4] = chunk_origin + set(x * voxel_size, y * voxel_size, (z + 1) * voxel_size);
-            corner_pos[5] = chunk_origin + set((x + 1) * voxel_size, y * voxel_size, (z + 1) * voxel_size);
-            corner_pos[6] = chunk_origin + set(x * voxel_size, (y + 1) * voxel_size, (z + 1) * voxel_size);
-            corner_pos[7] = chunk_origin + set((x + 1) * voxel_size, (y + 1) * voxel_size, (z + 1) * voxel_size);
-            
-            // 从 input 1 的 VDB volume 采样8个角点的密度值
-            corner_val[0] = volumesample(1, "density", corner_pos[0]);
-            corner_val[1] = volumesample(1, "density", corner_pos[1]);
-            corner_val[2] = volumesample(1, "density", corner_pos[2]);
-            corner_val[3] = volumesample(1, "density", corner_pos[3]);
-            corner_val[4] = volumesample(1, "density", corner_pos[4]);
-            corner_val[5] = volumesample(1, "density", corner_pos[5]);
-            corner_val[6] = volumesample(1, "density", corner_pos[6]);
-            corner_val[7] = volumesample(1, "density", corner_pos[7]);
+            // 按照 MarchingCubesCS.usf 的方式：不存储任何角点数据
+            // 角点位置和密度值将在后续节点中从体素索引实时计算和采样
             
             // 创建点，位置在体素中心
             int pt = addpoint(0, voxel_center);
@@ -134,10 +75,8 @@ for (int z = 0; z < voxel_res; z++) {
             setpointattrib(0, "min_bound", pt, min_bound);
             setpointattrib(0, "voxel_scale", pt, voxel_scale);
             
-            // 存储8个角点的密度值与位置（使用数组属性，与 pointsVEX 一致）
-            // corner_val: float[8]，corner_pos: vector[8]
-            setpointattrib(0, "corner_val", pt, corner_val);
-            setpointattrib(0, "corner_pos", pt, corner_pos);
+            // 按照 MarchingCubesCS.usf 的方式：不存储任何角点数据
+            // 角点位置和密度值将在后续节点中从体素索引实时计算和采样
             
             // 存储 chunk 信息（额外属性）
             setpointattrib(0, "chunk_x", pt, chunk_x);
@@ -145,10 +84,12 @@ for (int z = 0; z < voxel_res; z++) {
             setpointattrib(0, "chunk_z", pt, chunk_z);
             setpointattrib(0, "chunk_size", pt, chunk_size);
             setpointattrib(0, "chunk_origin", pt, chunk_origin);
-            setpointattrib(0, "lod_level", pt, lod_level);  // 存储 LOD 级别
             
-            // 计算体素中心的密度值用于颜色可视化（从 input 1 采样）
-            float center_density = volumesample(1, "density", voxel_center);
+            // 计算体素中心的密度值用于颜色可视化（从 input 1 采样，如果连接了 VDB）
+            float center_density = 0.0;
+            if (hasattrib(0, "volume", "density")) {
+                center_density = volumesample(1, "density", voxel_center);
+            }
             vector color = set(center_density, center_density, center_density);
             setpointattrib(0, "Cd", pt, color);
         }

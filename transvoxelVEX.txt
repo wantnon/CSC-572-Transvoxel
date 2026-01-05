@@ -1,12 +1,36 @@
-// VEX Code for Point Wrangle - Transvoxel 接缝修补
-// 从 input1 读取 Transition Cell 查找表数据
-// Input 0: 体素点云（来自 pointsVEX.txt，包含 transition cell 点）
+// VEX Code for Point Wrangle - Transvoxel 三角化
+// Input 0: transition cell 点阵（来自 transCellVEX.txt）
 // Input 1: 查找表数据（Detail Wrangle 节点，包含 transition cell 查找表）
+// Input 2: fog VDB volume（用于实时采样密度值）
+//
+// 功能：
+// 根据 transition cell 点阵生成三角面
+// 每个 transition cell 点会被处理，生成相应的三角形网格
 
 // 从 input1 读取查找表数据（detail 属性）
-int transitionCellClass[] = detail(1, "transitionCellClass");
-int transitionCellData[] = detail(1, "transitionCellData");
-int transitionVertexData[] = detail(1, "transitionVertexData");
+int transitionCellClass[];
+int transitionCellData[];
+int transitionVertexData[];
+
+// 尝试从 input1 读取查找表
+if (hasattrib(1, "detail", "transitionCellClass")) {
+    transitionCellClass = detail(1, "transitionCellClass");
+    transitionCellData = detail(1, "transitionCellData");
+    transitionVertexData = detail(1, "transitionVertexData");
+} else {
+    // 查找表不存在，尝试从 input0 读取（向后兼容）
+    if (hasattrib(0, "detail", "transitionCellClass")) {
+        transitionCellClass = detail(0, "transitionCellClass");
+        transitionCellData = detail(0, "transitionCellData");
+        transitionVertexData = detail(0, "transitionVertexData");
+    }
+}
+
+// 检查查找表是否存在
+if (len(transitionCellClass) < 512 || len(transitionCellData) < 2072 || len(transitionVertexData) < 6144) {
+    @group_del = 1;  // 标记删除，查找表数据不完整
+    return;
+}
 
 // 线性插值计算交点（与 computeTrianglesForTransvoxel 中的插值方式完全一致）
 vector VertexLerp(float isolevel; vector p1, p2; float val1, val2) {
@@ -25,19 +49,13 @@ vector VertexLerp(float isolevel; vector p1, p2; float val1, val2) {
 }
 
 // 计算梯度（法线方向）- 基于论文中的方法
-// 使用中心差分法计算密度场的梯度
-// 注意：需要确保 Input 0 连接了 volume 数据才能使用 volumesample
-// 如果无法访问 volume，此函数会返回默认法线，代码会自动回退到简单Z轴偏移
 vector ComputeGradient(vector pos; vector voxel_size) {
-    // 检查是否可以访问 volume（通过尝试采样）
-    float test_val = volumesample(0, "density", pos);
+    float test_val = volumesample(2, "density", pos);
     if (test_val == 0.0 && length(pos) > 1000000.0) {
-        // 如果采样失败，返回默认法线（将使用简单Z轴偏移）
         return set(0, 0, 1);
     }
     
     float eps = min(voxel_size.x, min(voxel_size.y, voxel_size.z)) * 0.5;
-    
     
     float val_xp = volumesample(2, "density", pos + set(eps, 0, 0));
     float val_xn = volumesample(2, "density", pos - set(eps, 0, 0));
@@ -51,59 +69,200 @@ vector ComputeGradient(vector pos; vector voxel_size) {
     grad.y = (val_yp - val_yn) / (2.0 * eps);
     grad.z = (val_zp - val_zn) / (2.0 * eps);
     
-    // 归一化梯度得到法线方向
     float len = length(grad);
     if (len > 0.00001) {
         return normalize(grad);
     }
-    return set(0, 0, 1);  // 默认法线
+    return set(0, 0, 1);
 }
 
-// 将偏移向量投影到切平面（垂直于法线的平面）
-// 基于论文中的"Projection of transition cell vertices onto the tangent plane"
+// 将偏移向量投影到切平面
 vector ProjectToTangentPlane(vector offset; vector normal) {
-    // 投影公式：projected = offset - dot(offset, normal) * normal
     float dot_product = dot(offset, normal);
     return offset - dot_product * normal;
 }
 
 // --- 主函数 ---
-float isolevel = chf("isolevel"); // 从通道获取isolevel
+float isolevel = chf("isolevel");
 
 // 只处理 transition cell 点
-int is_transition = point(0, "is_transition", @ptnum);
+int is_transition = 0;
+if (hasattrib(0, "point", "is_transition")) {
+    is_transition = point(0, "is_transition", @ptnum);
+}
+
 if (is_transition != 1) {
     @group_del = 1;  // 标记删除非 transition cell 点
     return;
 }
 
-vector voxel_size = point(0, "voxel_size", @ptnum);
+// 读取基础体素信息
+vector base_voxel_size = point(0, "base_voxel_size", @ptnum);
 vector min_bound = point(0, "min_bound", @ptnum);
+int base_voxel_scale = point(0, "base_voxel_scale", @ptnum);
+vector voxel_size = point(0, "voxel_size", @ptnum);
 int voxel_scale = point(0, "voxel_scale", @ptnum);
+
+// 读取 LOD 信息
+int lod_scale_0 = point(0, "lod_scale_0", @ptnum);
+int lod_scale_1 = point(0, "lod_scale_1", @ptnum);
 
 // 读取当前点的体素信息
 int x = point(0, "voxel_x", @ptnum);
 int y = point(0, "voxel_y", @ptnum);
 int z = point(0, "voxel_z", @ptnum);
 
-// 从点属性读取 transition cell 的 13 个角点位置和密度值
-vector trans_corner_pos[] = point(0, "trans_corner_pos", @ptnum);
-float trans_corner_val[] = point(0, "trans_corner_val", @ptnum);
-
-// 检查数组是否有效
-if (len(trans_corner_pos) < 13 || len(trans_corner_val) < 13) {
-    @group_del = 1;  // 标记删除无效点
-    return;
+// 读取边界方向（0=X, 1=Y, 2=Z，默认 Z）
+int boundary_axis = 2;
+if (hasattrib(0, "point", "boundary_axis")) {
+    boundary_axis = point(0, "boundary_axis", @ptnum);
 }
 
-// 检查查找表是否存在（很多"没出面"其实是 input1 没连对 / 没 cook）
-if (len(transitionCellClass) < 512 || len(transitionCellData) < 2072 || len(transitionVertexData) < 6144) {
-    @group_del = 1;
-    return;
+// 按照 MarchingCubesCS.usf 的方式：从体素索引实时计算角点位置和采样密度值
+vector trans_corner_pos[];
+float trans_corner_val[];
+resize(trans_corner_pos, 13);
+resize(trans_corner_val, 13);
+
+// 根据边界方向计算高分辨率面的坐标
+int coord_high;  // 高分辨率面的坐标（在边界轴上的值）
+if (boundary_axis == 0) {
+    // X 方向边界：高分辨率面在 x - voxel_scale
+    coord_high = x - voxel_scale;
+} else if (boundary_axis == 1) {
+    // Y 方向边界：高分辨率面在 y - voxel_scale
+    coord_high = y - voxel_scale;
+} else {
+    // Z 方向边界（默认）：高分辨率面在 z - voxel_scale
+    coord_high = z - voxel_scale;
 }
 
-// 计算 transition cube index（使用 9 个角点，不是 8 个）
-// 根据 C++ 代码：只使用前 9 个角点（高分辨率面）来计算 cube index
+// 角点 0-8: 高分辨率面的 3x3 网格
+// 根据边界方向调整角点计算
+if (boundary_axis == 0) {
+    // X 方向边界：固定 x = coord_high，在 Y-Z 平面上生成 3x3 网格
+    vector pos0_grid = set(coord_high, y - voxel_scale, z - voxel_scale);
+    trans_corner_pos[0] = min_bound + pos0_grid * base_voxel_size;
+    trans_corner_val[0] = volumesample(2, "density", trans_corner_pos[0]);
+    
+    vector pos1_grid = set(coord_high, y - voxel_scale/2, z - voxel_scale);
+    trans_corner_pos[1] = min_bound + pos1_grid * base_voxel_size;
+    trans_corner_val[1] = volumesample(2, "density", trans_corner_pos[1]);
+    
+    vector pos2_grid = set(coord_high, y, z - voxel_scale);
+    trans_corner_pos[2] = min_bound + pos2_grid * base_voxel_size;
+    trans_corner_val[2] = volumesample(2, "density", trans_corner_pos[2]);
+    
+    vector pos3_grid = set(coord_high, y - voxel_scale, z - voxel_scale/2);
+    trans_corner_pos[3] = min_bound + pos3_grid * base_voxel_size;
+    trans_corner_val[3] = volumesample(2, "density", trans_corner_pos[3]);
+    
+    vector pos4_grid = set(coord_high, y - voxel_scale/2, z - voxel_scale/2);
+    trans_corner_pos[4] = min_bound + pos4_grid * base_voxel_size;
+    trans_corner_val[4] = volumesample(2, "density", trans_corner_pos[4]);
+    
+    vector pos5_grid = set(coord_high, y, z - voxel_scale/2);
+    trans_corner_pos[5] = min_bound + pos5_grid * base_voxel_size;
+    trans_corner_val[5] = volumesample(2, "density", trans_corner_pos[5]);
+    
+    vector pos6_grid = set(coord_high, y - voxel_scale, z);
+    trans_corner_pos[6] = min_bound + pos6_grid * base_voxel_size;
+    trans_corner_val[6] = volumesample(2, "density", trans_corner_pos[6]);
+    
+    vector pos7_grid = set(coord_high, y - voxel_scale/2, z);
+    trans_corner_pos[7] = min_bound + pos7_grid * base_voxel_size;
+    trans_corner_val[7] = volumesample(2, "density", trans_corner_pos[7]);
+    
+    vector pos8_grid = set(coord_high, y, z);
+    trans_corner_pos[8] = min_bound + pos8_grid * base_voxel_size;
+    trans_corner_val[8] = volumesample(2, "density", trans_corner_pos[8]);
+} else if (boundary_axis == 1) {
+    // Y 方向边界：固定 y = coord_high，在 X-Z 平面上生成 3x3 网格
+    vector pos0_grid = set(x - voxel_scale, coord_high, z - voxel_scale);
+    trans_corner_pos[0] = min_bound + pos0_grid * base_voxel_size;
+    trans_corner_val[0] = volumesample(2, "density", trans_corner_pos[0]);
+    
+    vector pos1_grid = set(x - voxel_scale/2, coord_high, z - voxel_scale);
+    trans_corner_pos[1] = min_bound + pos1_grid * base_voxel_size;
+    trans_corner_val[1] = volumesample(2, "density", trans_corner_pos[1]);
+    
+    vector pos2_grid = set(x, coord_high, z - voxel_scale);
+    trans_corner_pos[2] = min_bound + pos2_grid * base_voxel_size;
+    trans_corner_val[2] = volumesample(2, "density", trans_corner_pos[2]);
+    
+    vector pos3_grid = set(x - voxel_scale, coord_high, z - voxel_scale/2);
+    trans_corner_pos[3] = min_bound + pos3_grid * base_voxel_size;
+    trans_corner_val[3] = volumesample(2, "density", trans_corner_pos[3]);
+    
+    vector pos4_grid = set(x - voxel_scale/2, coord_high, z - voxel_scale/2);
+    trans_corner_pos[4] = min_bound + pos4_grid * base_voxel_size;
+    trans_corner_val[4] = volumesample(2, "density", trans_corner_pos[4]);
+    
+    vector pos5_grid = set(x, coord_high, z - voxel_scale/2);
+    trans_corner_pos[5] = min_bound + pos5_grid * base_voxel_size;
+    trans_corner_val[5] = volumesample(2, "density", trans_corner_pos[5]);
+    
+    vector pos6_grid = set(x - voxel_scale, coord_high, z);
+    trans_corner_pos[6] = min_bound + pos6_grid * base_voxel_size;
+    trans_corner_val[6] = volumesample(2, "density", trans_corner_pos[6]);
+    
+    vector pos7_grid = set(x - voxel_scale/2, coord_high, z);
+    trans_corner_pos[7] = min_bound + pos7_grid * base_voxel_size;
+    trans_corner_val[7] = volumesample(2, "density", trans_corner_pos[7]);
+    
+    vector pos8_grid = set(x, coord_high, z);
+    trans_corner_pos[8] = min_bound + pos8_grid * base_voxel_size;
+    trans_corner_val[8] = volumesample(2, "density", trans_corner_pos[8]);
+} else {
+    // Z 方向边界（默认）：固定 z = coord_high，在 X-Y 平面上生成 3x3 网格
+    vector pos0_grid = set(x - voxel_scale, y - voxel_scale, coord_high);
+    trans_corner_pos[0] = min_bound + pos0_grid * base_voxel_size;
+    trans_corner_val[0] = volumesample(2, "density", trans_corner_pos[0]);
+    
+    vector pos1_grid = set(x - voxel_scale/2, y - voxel_scale, coord_high);
+    trans_corner_pos[1] = min_bound + pos1_grid * base_voxel_size;
+    trans_corner_val[1] = volumesample(2, "density", trans_corner_pos[1]);
+    
+    vector pos2_grid = set(x, y - voxel_scale, coord_high);
+    trans_corner_pos[2] = min_bound + pos2_grid * base_voxel_size;
+    trans_corner_val[2] = volumesample(2, "density", trans_corner_pos[2]);
+    
+    vector pos3_grid = set(x - voxel_scale, y - voxel_scale/2, coord_high);
+    trans_corner_pos[3] = min_bound + pos3_grid * base_voxel_size;
+    trans_corner_val[3] = volumesample(2, "density", trans_corner_pos[3]);
+    
+    vector pos4_grid = set(x - voxel_scale/2, y - voxel_scale/2, coord_high);
+    trans_corner_pos[4] = min_bound + pos4_grid * base_voxel_size;
+    trans_corner_val[4] = volumesample(2, "density", trans_corner_pos[4]);
+    
+    vector pos5_grid = set(x, y - voxel_scale/2, coord_high);
+    trans_corner_pos[5] = min_bound + pos5_grid * base_voxel_size;
+    trans_corner_val[5] = volumesample(2, "density", trans_corner_pos[5]);
+    
+    vector pos6_grid = set(x - voxel_scale, y, coord_high);
+    trans_corner_pos[6] = min_bound + pos6_grid * base_voxel_size;
+    trans_corner_val[6] = volumesample(2, "density", trans_corner_pos[6]);
+    
+    vector pos7_grid = set(x - voxel_scale/2, y, coord_high);
+    trans_corner_pos[7] = min_bound + pos7_grid * base_voxel_size;
+    trans_corner_val[7] = volumesample(2, "density", trans_corner_pos[7]);
+    
+    vector pos8_grid = set(x, y, coord_high);
+    trans_corner_pos[8] = min_bound + pos8_grid * base_voxel_size;
+    trans_corner_val[8] = volumesample(2, "density", trans_corner_pos[8]);
+}
+
+// 角点 9-12：低分辨率面的 4 个角点（初始与高分辨率面的某些角点相同）
+trans_corner_pos[9] = trans_corner_pos[0];
+trans_corner_val[9] = trans_corner_val[0];
+trans_corner_pos[10] = trans_corner_pos[2];
+trans_corner_val[10] = trans_corner_val[2];
+trans_corner_pos[11] = trans_corner_pos[6];
+trans_corner_val[11] = trans_corner_val[6];
+trans_corner_pos[12] = trans_corner_pos[8];
+trans_corner_val[12] = trans_corner_val[8];
+
+// 计算 transition cube index（使用 9 个角点）
 int transCubeIndex = 0;
 if (trans_corner_val[0] <= isolevel) transCubeIndex |= 1;
 if (trans_corner_val[1] <= isolevel) transCubeIndex |= 2;
@@ -122,61 +281,71 @@ if (transCubeIndex == 0 || transCubeIndex == 511) {
 }
 
 // 使用 Transition Cell 算法
-// transitionCellClass 的高位(0x80)表示该 case 使用"反相"的等价类，需要反转三角形绕序
-// 低 7 位(0x7F)是 class index
 int transClassRaw = transitionCellClass[transCubeIndex];
 int transCellClass = transClassRaw & 0x7F;
 int transInvertWinding = (transClassRaw & 0x80) != 0;
 
-// 保护：class 越界时直接跳过，避免读错表导致"完全不出三角形"
 if (transCellClass < 0 || transCellClass >= 56) {
     @group_del = 1;
     return;
 }
 
 // 获取该类的三角化数据
-// 重要：transitionCellData 来自 Transvoxel.h 的 TransitionCellData[56]
-// 每个类包含：geometryCounts + 36 个索引，所以 stride = 37（不是 regular 的 16）
 int baseIndex = transCellClass * 37;
 if (baseIndex < 0 || baseIndex + 36 >= len(transitionCellData)) {
     @group_del = 1;
     return;
 }
 int geometryCounts = transitionCellData[baseIndex];
-int vertex_count = (geometryCounts / 16) & 0x0F;  // 顶点数（高4位，右移4位 = 除以16）
-int triangle_count = geometryCounts & 0x0F;       // 三角形数（低4位）
+int vertex_count = (geometryCounts / 16) & 0x0F;
+int triangle_count = geometryCounts & 0x0F;
 
 if (vertex_count == 0) {
-    @group_del = 1;  // 标记删除没有顶点的点
+    @group_del = 1;
     return;
 }
 
-// 获取该情况的顶点数据（从 transitionVertexData 中读取）
-// transitionVertexData 数组索引: transCubeIndex * 12 + vertex_index
+// 获取该情况的顶点数据
 vector edge_vertices[];
 resize(edge_vertices, vertex_count);
 
-// 轴方向：Negative z axis (1 << 5 = 32)
-int axis = 32;  // 1 << 5 = 32
+// 根据边界方向确定轴和偏移方向
+int axis;  // 32=Negative Z, 16=Positive Z, 8=Negative Y, 4=Positive Y, 2=Negative X, 1=Positive X
+vector offset_direction;
+float offset_amount;
 
-int actual_vertex_count = 0;  // 实际生成的顶点数
+if (boundary_axis == 0) {
+    // X 方向边界：偏移沿 X 轴
+    axis = 1;  // Positive X（朝向高分辨率侧）
+    offset_amount = voxel_scale * base_voxel_size.x * 0.5;
+    offset_direction = set(offset_amount, 0, 0);
+} else if (boundary_axis == 1) {
+    // Y 方向边界：偏移沿 Y 轴
+    axis = 4;  // Positive Y（朝向高分辨率侧）
+    offset_amount = voxel_scale * base_voxel_size.y * 0.5;
+    offset_direction = set(0, offset_amount, 0);
+} else {
+    // Z 方向边界（默认）：偏移沿 Z 轴
+    axis = 32;  // Negative Z（朝向高分辨率侧）
+    offset_amount = voxel_scale * base_voxel_size.z * 0.5;
+    offset_direction = set(0, 0, offset_amount);
+}
+
+int actual_vertex_count = 0;
+
 for (int i = 0; i < vertex_count; ++i) {
-    // 从 transitionVertexData 数组获取顶点数据
     int vertex_data_index = transCubeIndex * 12 + i;
     
-    // 检查数组边界
     if (vertex_data_index >= len(transitionVertexData)) break;
     
     int vertex_data = transitionVertexData[vertex_data_index];
     
-    if (vertex_data == 0) break;  // 没有更多顶点
+    if (vertex_data == 0) break;
     
-    // 检查角点索引有效性
-    int c1 = (vertex_data / 16) & 0x0F;  // 高4位 = corner1
-    int c2 = vertex_data & 0x0F;         // 低4位 = corner2
+    int c1 = (vertex_data / 16) & 0x0F;
+    int c2 = vertex_data & 0x0F;
     
     if (c1 >= 13 || c2 >= 13) {
-        // 角点索引无效，跳过这个顶点
         continue;
     }
     
@@ -186,36 +355,26 @@ for (int i = 0; i < vertex_count; ++i) {
     float isovalue1 = trans_corner_val[c1];
     float isovalue2 = trans_corner_val[c2];
     
-    // half-thickness：对低分辨率面的角点（corner >= 9）做 Z 轴向偏移
-    // 改进：使用切平面投影减少几何变形（基于论文 Figure 4.12）
-    if (axis == 32) {  // Negative z axis
-        float offset_amount = voxel_scale * voxel_size.z * 0.5;
-        vector z_offset = set(0, 0, offset_amount);
-        
-        if (c1 >= 9) {
-            // 计算角点的法线（梯度方向）
-            vector normal1 = ComputeGradient(cornerPos1, voxel_size);
-            // 将Z轴偏移投影到切平面（减少几何变形）
-            // 如果法线无效，ProjectToTangentPlane 会返回接近原始偏移的值
-            vector projected_offset1 = ProjectToTangentPlane(z_offset, normal1);
-            cornerPos1 += projected_offset1;
-        }
-        if (c2 >= 9) {
-            // 同样的切平面投影
-            vector normal2 = ComputeGradient(cornerPos2, voxel_size);
-            vector projected_offset2 = ProjectToTangentPlane(z_offset, normal2);
-            cornerPos2 += projected_offset2;
-        }
+    // half-thickness：对低分辨率面的角点（corner >= 9）做轴向偏移
+    if (c1 >= 9) {
+        vector normal1 = ComputeGradient(cornerPos1, base_voxel_size);
+        vector projected_offset1 = ProjectToTangentPlane(offset_direction, normal1);
+        cornerPos1 += projected_offset1;
+    }
+    if (c2 >= 9) {
+        vector normal2 = ComputeGradient(cornerPos2, base_voxel_size);
+        vector projected_offset2 = ProjectToTangentPlane(offset_direction, normal2);
+        cornerPos2 += projected_offset2;
     }
     
-    // 使用与 computeTrianglesForTransvoxel 相同的插值公式
+    // 使用插值计算顶点位置
     vector vertex_pos = VertexLerp(isolevel, cornerPos1, cornerPos2, isovalue1, isovalue2);
     edge_vertices[actual_vertex_count] = vertex_pos;
     actual_vertex_count++;
 }
 
 // 根据 cellData 创建三角形
-int cell_data_base = transCellClass * 37 + 1;  // 跳过 geometryCounts
+int cell_data_base = transCellClass * 37 + 1;
 for (int i = 0; i < triangle_count * 3; i += 3) {
     int idx0 = transitionCellData[cell_data_base + i];
     int idx1 = transitionCellData[cell_data_base + i + 1];
@@ -223,12 +382,11 @@ for (int i = 0; i < triangle_count * 3; i += 3) {
     
     if (idx0 < 0 || idx1 < 0 || idx2 < 0) break;
     
-    // 使用实际顶点数而不是数组长度
     if (idx0 >= actual_vertex_count || idx1 >= actual_vertex_count || idx2 >= actual_vertex_count) {
-        continue;  // 索引越界，跳过
+        continue;
     }
-
-    // 如果该 case 是“反相等价类”，需要反转绕序（与 Transvoxel.h 注释一致）
+    
+    // 如果该 case 是"反相等价类"，需要反转绕序
     if (transInvertWinding) {
         int tmp = idx1;
         idx1 = idx2;
@@ -241,12 +399,10 @@ for (int i = 0; i < triangle_count * 3; i += 3) {
     int prim = addprim(0, "poly", p0_idx, p1_idx, p2_idx);
     
     // 在顶点属性上设置为红色
-    setpointattrib(0, "Cd", p0_idx, set(1, 0, 0));  // 红色
-    setpointattrib(0, "Cd", p1_idx, set(1, 0, 0));  // 红色
-    setpointattrib(0, "Cd", p2_idx, set(1, 0, 0));  // 红色
+    setpointattrib(0, "Cd", p0_idx, set(1, 0, 0));
+    setpointattrib(0, "Cd", p1_idx, set(1, 0, 0));
+    setpointattrib(0, "Cd", p2_idx, set(1, 0, 0));
 }
 
 // 标记删除当前点阵点（三角形已生成，不再需要原始点）
 @group_del = 1;
-
-
