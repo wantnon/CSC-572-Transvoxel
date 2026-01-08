@@ -143,12 +143,10 @@ if (abs_chunk_x >= abs_chunk_y && abs_chunk_x >= abs_chunk_z) {
         lod_boundary = voxel_res - 1;  // 高分辨率 trunk 在正方向，边界在最后一层
     } else if (chunk_diff < 0) {
         // 高分辨率 trunk 在负方向，边界在第一层
-        // 关键理解：transition cell 的高分辨率面在中心坐标 - voxel_scale 的位置
-        // 例如：如果中心在 x，高分辨率面在 x - voxel_scale（见 transvoxelVEX.txt）
-        // trunk1 的边界在 x=0，高分辨率面应该对齐在 x=0
-        // 因此中心应该在 x = 0 + voxel_scale = voxel_scale
-        // 这不是硬凑，而是基于 transition cell 几何结构的正确计算
-        lod_boundary = voxel_scale;
+        // 需要考虑对齐：transition cell 的高分辨率面应该与高分辨率 trunk 对齐
+        // 由于中心点计算会减去 voxel_scale * 0.5，所以边界位置需要加上 voxel_scale
+        // 这样中心点才会在正确的位置
+        lod_boundary = voxel_scale;  // 边界在第一层，但需要考虑中心点计算的偏移
     } else {
         lod_boundary = voxel_res / 2;  // 如果相同，使用中间值
     }
@@ -165,9 +163,7 @@ if (abs_chunk_x >= abs_chunk_y && abs_chunk_x >= abs_chunk_z) {
     if (chunk_diff > 0) {
         lod_boundary = voxel_res - 1;
     } else if (chunk_diff < 0) {
-        // 高分辨率 trunk 在负方向，边界在第一层
-        // transition cell 的高分辨率面在中心 - voxel_scale，需要对齐到边界 x=0
-        lod_boundary = voxel_scale;
+        lod_boundary = voxel_scale;  // 边界在第一层，但需要考虑中心点计算的偏移
     } else {
         lod_boundary = voxel_res / 2;
     }
@@ -184,9 +180,7 @@ if (abs_chunk_x >= abs_chunk_y && abs_chunk_x >= abs_chunk_z) {
     if (chunk_diff > 0) {
         lod_boundary = voxel_res - 1;
     } else if (chunk_diff < 0) {
-        // 高分辨率 trunk 在负方向，边界在第一层
-        // transition cell 的高分辨率面在中心 - voxel_scale，需要对齐到边界 z=0
-        lod_boundary = voxel_scale;
+        lod_boundary = voxel_scale;  // 边界在第一层，但需要考虑中心点计算的偏移
     } else {
         lod_boundary = voxel_res / 2;
     }

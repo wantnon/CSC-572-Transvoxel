@@ -101,18 +101,6 @@ int x = point(0, "voxel_x", @ptnum);
 int y = point(0, "voxel_y", @ptnum);
 int z = point(0, "voxel_z", @ptnum);
 
-// 角点偏移数组（与 C++ computeTrianglesForVoxel 中的角点顺序一致）
-vector corner_offsets[];
-resize(corner_offsets, 8);
-corner_offsets[0] = set(0, 0, 0);
-corner_offsets[1] = set(1, 0, 0);
-corner_offsets[2] = set(0, 1, 0);
-corner_offsets[3] = set(1, 1, 0);
-corner_offsets[4] = set(0, 0, 1);
-corner_offsets[5] = set(1, 0, 1);
-corner_offsets[6] = set(0, 1, 1);
-corner_offsets[7] = set(1, 1, 1);
-
 // 从体素索引计算角点位置
 vector origin;
 if (hasattrib(0, "point", "chunk_origin")) {
@@ -122,20 +110,32 @@ if (hasattrib(0, "point", "chunk_origin")) {
 }
 
 // 实时计算8个角点的世界坐标位置并从 VDB 采样密度值
+// 重要：这里与 formerVersion 的 pointsVEX + marchCubeVEX 语义对齐
+// voxel_x/y/z 被当作 “upper corner”（右上前角）的网格坐标
+// 8 个角点顺序与 pointsVEX.txt 的 boundary lowres cell 完全一致：
+// [0] = (x-voxel_scale, y-voxel_scale, z-voxel_scale)
+// [1] = (x,            y-voxel_scale, z-voxel_scale)
+// [2] = (x-voxel_scale,y,             z-voxel_scale)
+// [3] = (x,            y,             z-voxel_scale)
+// [4] = (x-voxel_scale,y-voxel_scale, z)
+// [5] = (x,            y-voxel_scale, z)
+// [6] = (x-voxel_scale,y,             z)
+// [7] = (x,            y,             z)
 vector corner_pos[];
 float corner_val[];
 resize(corner_pos, 8);
 resize(corner_val, 8);
 
-for (int i = 0; i < 8; i++) {
-    vector offset = corner_offsets[i];
-    // boundary cell 使用低分辨率的 voxel_scale，角点范围是 (x, y, z) 到 (x+voxel_scale, y+voxel_scale, z+voxel_scale)
-    vector corner_coord = set(x + offset.x * voxel_scale, 
-                               y + offset.y * voxel_scale, 
-                               z + offset.z * voxel_scale);
-    corner_pos[i] = origin + set(corner_coord.x * base_voxel_size.x, 
-                                  corner_coord.y * base_voxel_size.y, 
-                                  corner_coord.z * base_voxel_size.z);
+corner_pos[0] = origin + set(x - voxel_scale, y - voxel_scale, z - voxel_scale) * base_voxel_size;
+corner_pos[1] = origin + set(x,              y - voxel_scale, z - voxel_scale) * base_voxel_size;
+corner_pos[2] = origin + set(x - voxel_scale, y,              z - voxel_scale) * base_voxel_size;
+corner_pos[3] = origin + set(x,              y,              z - voxel_scale) * base_voxel_size;
+corner_pos[4] = origin + set(x - voxel_scale, y - voxel_scale, z) * base_voxel_size;
+corner_pos[5] = origin + set(x,              y - voxel_scale, z) * base_voxel_size;
+corner_pos[6] = origin + set(x - voxel_scale, y,              z) * base_voxel_size;
+corner_pos[7] = origin + set(x,              y,              z) * base_voxel_size;
+
+for (int i = 0; i < 8; ++i) {
     corner_val[i] = volumesample(2, "density", corner_pos[i]);
 }
 
@@ -296,4 +296,3 @@ for (int i = 0; i < triangle_count * 3; i += 3) {
 
 // 标记删除当前点阵点
 @group_del = 1;
-

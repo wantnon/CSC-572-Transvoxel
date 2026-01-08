@@ -1,3 +1,4 @@
+
 // VEX Code for Detail Wrangle - 生成 Boundary Cell 点阵
 // Input 0: trunk0 体素点云（来自 chunkVEX.txt）
 // Input 1: trunk1 体素点云（来自 chunkVEX.txt）
@@ -205,6 +206,8 @@ if (boundary_axis == 0) {
             setpointattrib(0, "voxel_size", pt, voxel_size);
             setpointattrib(0, "min_bound", pt, min_bound);
             setpointattrib(0, "voxel_scale", pt, voxel_scale);
+            // 传递 chunk_origin，避免下游靠 min_bound fallback（与 chunkVEX/ marchCubeVEX 习惯一致）
+            setpointattrib(0, "chunk_origin", pt, chunk_origin);
             
             // 存储 LOD 信息
             setpointattrib(0, "lod_level_0", pt, lod_level_0);
@@ -248,6 +251,7 @@ if (boundary_axis == 0) {
             setpointattrib(0, "voxel_size", pt, voxel_size);
             setpointattrib(0, "min_bound", pt, min_bound);
             setpointattrib(0, "voxel_scale", pt, voxel_scale);
+            setpointattrib(0, "chunk_origin", pt, chunk_origin);
             
             // 存储 LOD 信息
             setpointattrib(0, "lod_level_0", pt, lod_level_0);
@@ -290,6 +294,7 @@ if (boundary_axis == 0) {
             setpointattrib(0, "voxel_size", pt, voxel_size);
             setpointattrib(0, "min_bound", pt, min_bound);
             setpointattrib(0, "voxel_scale", pt, voxel_scale);
+            setpointattrib(0, "chunk_origin", pt, chunk_origin);
             
             // 存储 LOD 信息
             setpointattrib(0, "lod_level_0", pt, lod_level_0);
