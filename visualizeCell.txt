@@ -1,0 +1,123 @@
+// VEX Code for Point Wrangle - Cell 线框可视化
+// Input 0: 体素点云（来自 chunkVEX.txt, boundaryCellVEX.txt 等）
+//
+// 功能：
+// 将每个 cell 以线框形式可视化出来
+// 支持 regular cell 和 boundary cell
+//
+// 使用方法：
+// 1. 在 Houdini 中创建一个 Point Wrangle 节点
+// 2. 将体素点云连接到 Input 0
+// 3. 将此代码复制到 VEXpression 中
+// 4. 在视图中可以看到每个 cell 的线框
+
+// --- 主函数 ---
+
+// 读取体素信息
+int x = point(0, "voxel_x", @ptnum);
+int y = point(0, "voxel_y", @ptnum);
+int z = point(0, "voxel_z", @ptnum);
+
+// 读取基础体素信息（与 marchCubeForBoundaryVEX.txt 一致）
+vector base_voxel_size;
+vector min_bound = point(0, "min_bound", @ptnum);
+int base_voxel_scale;
+vector voxel_size = point(0, "voxel_size", @ptnum);
+int voxel_scale = point(0, "voxel_scale", @ptnum);
+
+// 如果存在 base_voxel_size 和 base_voxel_scale，使用它们（与 marchCubeForBoundaryVEX 一致）
+if (hasattrib(0, "point", "base_voxel_size")) {
+    base_voxel_size = point(0, "base_voxel_size", @ptnum);
+    base_voxel_scale = point(0, "base_voxel_scale", @ptnum);
+} else {
+    // 如果没有 base_voxel_size，使用 voxel_size 作为基础值
+    base_voxel_size = voxel_size;
+    base_voxel_scale = voxel_scale;
+}
+
+// 确定坐标系原点（优先使用 chunk_origin）
+vector origin;
+if (hasattrib(0, "point", "chunk_origin")) {
+    origin = point(0, "chunk_origin", @ptnum);
+} else {
+    origin = min_bound;
+}
+
+// Regular cell 或 boundary cell：8 个角点
+// 计算 8 个角点的位置（upper corner 语义）
+// 角点顺序（与 pointsVEX.txt 和 marchCubeVEX.txt 一致）：
+// [0] = (x-voxel_scale, y-voxel_scale, z-voxel_scale) - 左下后角
+// [1] = (x,            y-voxel_scale, z-voxel_scale) - 右下后角
+// [2] = (x-voxel_scale,y,             z-voxel_scale) - 左上后角
+// [3] = (x,            y,             z-voxel_scale) - 右上后角
+// [4] = (x-voxel_scale,y-voxel_scale, z)            - 左下前角
+// [5] = (x,            y-voxel_scale, z)            - 右下前角
+// [6] = (x-voxel_scale,y,             z)            - 左上前角
+// [7] = (x,            y,             z)            - 右上前角
+vector corners[];
+resize(corners, 8);
+
+// 使用 base_voxel_size 计算角点位置（与 marchCubeForBoundaryVEX 一致）
+corners[0] = origin + set(x - voxel_scale, y - voxel_scale, z - voxel_scale) * base_voxel_size;
+corners[1] = origin + set(x,              y - voxel_scale, z - voxel_scale) * base_voxel_size;
+corners[2] = origin + set(x - voxel_scale, y,              z - voxel_scale) * base_voxel_size;
+corners[3] = origin + set(x,              y,              z - voxel_scale) * base_voxel_size;
+corners[4] = origin + set(x - voxel_scale, y - voxel_scale, z) * base_voxel_size;
+corners[5] = origin + set(x,              y - voxel_scale, z) * base_voxel_size;
+corners[6] = origin + set(x - voxel_scale, y,              z) * base_voxel_size;
+corners[7] = origin + set(x,              y,              z) * base_voxel_size;
+
+// 创建 8 个角点
+int corner_pts[];
+resize(corner_pts, 8);
+
+// 根据 cell 类型设置颜色
+vector line_color = set(0.5, 0.5, 0.5);  // 默认灰色
+
+if (hasattrib(0, "point", "is_boundary_lowres")) {
+    int is_boundary = point(0, "is_boundary_lowres", @ptnum);
+    if (is_boundary == 1) {
+        line_color = set(0, 1, 0);  // 绿色：boundary cell
+    }
+}
+
+for (int i = 0; i < 8; i++) {
+    corner_pts[i] = addpoint(0, corners[i]);
+    setpointattrib(0, "Cd", corner_pts[i], line_color);
+}
+
+// 创建 12 条边（立方体的 12 条边）
+// 底面 4 条边
+int edge0 = addprim(0, "polyline", corner_pts[0], corner_pts[1]);
+int edge1 = addprim(0, "polyline", corner_pts[1], corner_pts[3]);
+int edge2 = addprim(0, "polyline", corner_pts[3], corner_pts[2]);
+int edge3 = addprim(0, "polyline", corner_pts[2], corner_pts[0]);
+
+// 顶面 4 条边
+int edge4 = addprim(0, "polyline", corner_pts[4], corner_pts[5]);
+int edge5 = addprim(0, "polyline", corner_pts[5], corner_pts[7]);
+int edge6 = addprim(0, "polyline", corner_pts[7], corner_pts[6]);
+int edge7 = addprim(0, "polyline", corner_pts[6], corner_pts[4]);
+
+// 垂直 4 条边
+int edge8 = addprim(0, "polyline", corner_pts[0], corner_pts[4]);
+int edge9 = addprim(0, "polyline", corner_pts[1], corner_pts[5]);
+int edge10 = addprim(0, "polyline", corner_pts[2], corner_pts[6]);
+int edge11 = addprim(0, "polyline", corner_pts[3], corner_pts[7]);
+
+// 为所有边设置颜色
+setprimattrib(0, "Cd", edge0, line_color);
+setprimattrib(0, "Cd", edge1, line_color);
+setprimattrib(0, "Cd", edge2, line_color);
+setprimattrib(0, "Cd", edge3, line_color);
+setprimattrib(0, "Cd", edge4, line_color);
+setprimattrib(0, "Cd", edge5, line_color);
+setprimattrib(0, "Cd", edge6, line_color);
+setprimattrib(0, "Cd", edge7, line_color);
+setprimattrib(0, "Cd", edge8, line_color);
+setprimattrib(0, "Cd", edge9, line_color);
+setprimattrib(0, "Cd", edge10, line_color);
+setprimattrib(0, "Cd", edge11, line_color);
+
+// 标记删除原始点（可选，如果想保留原始点可以注释掉）
+// @group_del = 1;

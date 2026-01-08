@@ -1,0 +1,231 @@
+// VEX Code for Point Wrangle - Transition Cell 线框可视化
+// VEX Code for Point Wrangle - Transition Cell 线框可视化
+// Input 0: transition cell 点云（来自 transCellVEX.txt）
+//
+// 功能：
+// 将每个 transition cell 以线框形式可视化出来
+// Transition cell 有 13 个角点：
+//   - 角点 0-8：高分辨率面的 3x3 网格
+//   - 角点 9-12：低分辨率面的 4 个角点（应用 half-thickness 偏移后）
+//
+// 使用方法：
+// 1. 在 Houdini 中创建一个 Point Wrangle 节点
+// 2. 将 transition cell 点云连接到 Input 0
+// 3. 将此代码复制到 VEXpression 中
+// 4. 在视图中可以看到每个 transition cell 的线框
+
+// --- 主函数 ---
+
+// 只处理 transition cell 点
+int is_transition = 0;
+if (hasattrib(0, "point", "is_transition")) {
+    is_transition = point(0, "is_transition", @ptnum);
+}
+
+if (is_transition != 1) {
+    @group_del = 1;  // 标记删除非 transition cell 点
+    return;
+}
+
+// 读取体素信息
+int x = point(0, "voxel_x", @ptnum);
+int y = point(0, "voxel_y", @ptnum);
+int z = point(0, "voxel_z", @ptnum);
+
+// 读取基础体素信息（与 transvoxelVEX.txt 一致）
+vector base_voxel_size = point(0, "base_voxel_size", @ptnum);
+vector min_bound = point(0, "min_bound", @ptnum);
+int base_voxel_scale = point(0, "base_voxel_scale", @ptnum);
+vector voxel_size = point(0, "voxel_size", @ptnum);
+int voxel_scale = point(0, "voxel_scale", @ptnum);
+
+// 读取边界方向（0=X, 1=Y, 2=Z，默认 Z）
+int boundary_axis = 2;
+if (hasattrib(0, "point", "boundary_axis")) {
+    boundary_axis = point(0, "boundary_axis", @ptnum);
+}
+
+// 使用 min_bound 作为原点（与 transvoxelVEX.txt 一致）
+// transCellVEX.txt 没有设置 chunk_origin，且 transvoxelVEX.txt 使用 min_bound
+
+// 根据边界方向计算高分辨率面的坐标（与 transvoxelVEX.txt 一致）
+int coord_high;  // 高分辨率面的坐标（在边界轴上的值）
+if (boundary_axis == 0) {
+    // X 方向边界：高分辨率面在 x - voxel_scale
+    coord_high = x - voxel_scale;
+} else if (boundary_axis == 1) {
+    // Y 方向边界：高分辨率面在 y - voxel_scale
+    coord_high = y - voxel_scale;
+} else {
+    // Z 方向边界（默认）：高分辨率面在 z - voxel_scale
+    coord_high = z - voxel_scale;
+}
+
+// 计算 13 个角点的位置（与 transvoxelVEX.txt 完全一致）
+vector trans_corners[];
+resize(trans_corners, 13);
+
+if (boundary_axis == 0) {
+    // X 方向边界：固定 x = coord_high，在 Y-Z 平面上生成 3x3 网格
+    vector pos0_grid = set(coord_high, y - voxel_scale, z - voxel_scale);
+    trans_corners[0] = min_bound + pos0_grid * base_voxel_size;
+    
+    vector pos1_grid = set(coord_high, y - voxel_scale/2, z - voxel_scale);
+    trans_corners[1] = min_bound + pos1_grid * base_voxel_size;
+    
+    vector pos2_grid = set(coord_high, y, z - voxel_scale);
+    trans_corners[2] = min_bound + pos2_grid * base_voxel_size;
+    
+    vector pos3_grid = set(coord_high, y - voxel_scale, z - voxel_scale/2);
+    trans_corners[3] = min_bound + pos3_grid * base_voxel_size;
+    
+    vector pos4_grid = set(coord_high, y - voxel_scale/2, z - voxel_scale/2);
+    trans_corners[4] = min_bound + pos4_grid * base_voxel_size;
+    
+    vector pos5_grid = set(coord_high, y, z - voxel_scale/2);
+    trans_corners[5] = min_bound + pos5_grid * base_voxel_size;
+    
+    vector pos6_grid = set(coord_high, y - voxel_scale, z);
+    trans_corners[6] = min_bound + pos6_grid * base_voxel_size;
+    
+    vector pos7_grid = set(coord_high, y - voxel_scale/2, z);
+    trans_corners[7] = min_bound + pos7_grid * base_voxel_size;
+    
+    vector pos8_grid = set(coord_high, y, z);
+    trans_corners[8] = min_bound + pos8_grid * base_voxel_size;
+} else if (boundary_axis == 1) {
+    // Y 方向边界：固定 y = coord_high，在 X-Z 平面上生成 3x3 网格
+    vector pos0_grid = set(x - voxel_scale, coord_high, z - voxel_scale);
+    trans_corners[0] = min_bound + pos0_grid * base_voxel_size;
+    
+    vector pos1_grid = set(x - voxel_scale/2, coord_high, z - voxel_scale);
+    trans_corners[1] = min_bound + pos1_grid * base_voxel_size;
+    
+    vector pos2_grid = set(x, coord_high, z - voxel_scale);
+    trans_corners[2] = min_bound + pos2_grid * base_voxel_size;
+    
+    vector pos3_grid = set(x - voxel_scale, coord_high, z - voxel_scale/2);
+    trans_corners[3] = min_bound + pos3_grid * base_voxel_size;
+    
+    vector pos4_grid = set(x - voxel_scale/2, coord_high, z - voxel_scale/2);
+    trans_corners[4] = min_bound + pos4_grid * base_voxel_size;
+    
+    vector pos5_grid = set(x, coord_high, z - voxel_scale/2);
+    trans_corners[5] = min_bound + pos5_grid * base_voxel_size;
+    
+    vector pos6_grid = set(x - voxel_scale, coord_high, z);
+    trans_corners[6] = min_bound + pos6_grid * base_voxel_size;
+    
+    vector pos7_grid = set(x - voxel_scale/2, coord_high, z);
+    trans_corners[7] = min_bound + pos7_grid * base_voxel_size;
+    
+    vector pos8_grid = set(x, coord_high, z);
+    trans_corners[8] = min_bound + pos8_grid * base_voxel_size;
+} else {
+    // Z 方向边界（默认）：固定 z = coord_high，在 X-Y 平面上生成 3x3 网格
+    vector pos0_grid = set(x - voxel_scale, y - voxel_scale, coord_high);
+    trans_corners[0] = min_bound + pos0_grid * base_voxel_size;
+    
+    vector pos1_grid = set(x - voxel_scale/2, y - voxel_scale, coord_high);
+    trans_corners[1] = min_bound + pos1_grid * base_voxel_size;
+    
+    vector pos2_grid = set(x, y - voxel_scale, coord_high);
+    trans_corners[2] = min_bound + pos2_grid * base_voxel_size;
+    
+    vector pos3_grid = set(x - voxel_scale, y - voxel_scale/2, coord_high);
+    trans_corners[3] = min_bound + pos3_grid * base_voxel_size;
+    
+    vector pos4_grid = set(x - voxel_scale/2, y - voxel_scale/2, coord_high);
+    trans_corners[4] = min_bound + pos4_grid * base_voxel_size;
+    
+    vector pos5_grid = set(x, y - voxel_scale/2, coord_high);
+    trans_corners[5] = min_bound + pos5_grid * base_voxel_size;
+    
+    vector pos6_grid = set(x - voxel_scale, y, coord_high);
+    trans_corners[6] = min_bound + pos6_grid * base_voxel_size;
+    
+    vector pos7_grid = set(x - voxel_scale/2, y, coord_high);
+    trans_corners[7] = min_bound + pos7_grid * base_voxel_size;
+    
+    vector pos8_grid = set(x, y, coord_high);
+    trans_corners[8] = min_bound + pos8_grid * base_voxel_size;
+}
+
+// 角点 9-12：低分辨率面的 4 个角点（初始与高分辨率面的某些角点相同）
+trans_corners[9] = trans_corners[0];
+trans_corners[10] = trans_corners[2];
+trans_corners[11] = trans_corners[6];
+trans_corners[12] = trans_corners[8];
+
+// 对低分辨率面的角点应用 half-thickness 偏移（与 transvoxelVEX 一致）
+float offset_amount = voxel_scale * base_voxel_size.z * 0.5;  // 默认 Z 方向
+if (boundary_axis == 0) {
+    offset_amount = voxel_scale * base_voxel_size.x * 0.5;
+    trans_corners[9].x += offset_amount;
+    trans_corners[10].x += offset_amount;
+    trans_corners[11].x += offset_amount;
+    trans_corners[12].x += offset_amount;
+} else if (boundary_axis == 1) {
+    offset_amount = voxel_scale * base_voxel_size.y * 0.5;
+    trans_corners[9].y += offset_amount;
+    trans_corners[10].y += offset_amount;
+    trans_corners[11].y += offset_amount;
+    trans_corners[12].y += offset_amount;
+} else {
+    trans_corners[9].z += offset_amount;
+    trans_corners[10].z += offset_amount;
+    trans_corners[11].z += offset_amount;
+    trans_corners[12].z += offset_amount;
+}
+
+// 创建 13 个角点
+int trans_corner_pts[];
+resize(trans_corner_pts, 13);
+vector trans_color = set(1, 1, 0);  // 黄色：transition cell
+
+for (int i = 0; i < 13; i++) {
+    trans_corner_pts[i] = addpoint(0, trans_corners[i]);
+    setpointattrib(0, "Cd", trans_corner_pts[i], trans_color);
+}
+
+// 绘制高分辨率面的 3x3 网格线框
+// 行 0：角点 0-1-2
+addprim(0, "polyline", trans_corner_pts[0], trans_corner_pts[1]);
+addprim(0, "polyline", trans_corner_pts[1], trans_corner_pts[2]);
+// 行 1：角点 3-4-5
+addprim(0, "polyline", trans_corner_pts[3], trans_corner_pts[4]);
+addprim(0, "polyline", trans_corner_pts[4], trans_corner_pts[5]);
+// 行 2：角点 6-7-8
+addprim(0, "polyline", trans_corner_pts[6], trans_corner_pts[7]);
+addprim(0, "polyline", trans_corner_pts[7], trans_corner_pts[8]);
+// 列 0：角点 0-3-6
+addprim(0, "polyline", trans_corner_pts[0], trans_corner_pts[3]);
+addprim(0, "polyline", trans_corner_pts[3], trans_corner_pts[6]);
+// 列 1：角点 1-4-7
+addprim(0, "polyline", trans_corner_pts[1], trans_corner_pts[4]);
+addprim(0, "polyline", trans_corner_pts[4], trans_corner_pts[7]);
+// 列 2：角点 2-5-8
+addprim(0, "polyline", trans_corner_pts[2], trans_corner_pts[5]);
+addprim(0, "polyline", trans_corner_pts[5], trans_corner_pts[8]);
+
+// 绘制低分辨率面的 4 个角点之间的边
+addprim(0, "polyline", trans_corner_pts[9], trans_corner_pts[10]);
+addprim(0, "polyline", trans_corner_pts[10], trans_corner_pts[12]);
+addprim(0, "polyline", trans_corner_pts[12], trans_corner_pts[11]);
+addprim(0, "polyline", trans_corner_pts[11], trans_corner_pts[9]);
+
+// 绘制连接高分辨率面和低分辨率面的边
+addprim(0, "polyline", trans_corner_pts[0], trans_corner_pts[9]);
+addprim(0, "polyline", trans_corner_pts[2], trans_corner_pts[10]);
+addprim(0, "polyline", trans_corner_pts[6], trans_corner_pts[11]);
+addprim(0, "polyline", trans_corner_pts[8], trans_corner_pts[12]);
+
+// 为所有边设置颜色
+int num_prims = nprimitives(0);
+for (int i = num_prims - 20; i < num_prims; i++) {
+    setprimattrib(0, "Cd", i, trans_color);
+}
+
+// 标记删除原始点（可选，如果想保留原始点可以注释掉）
+// @group_del = 1;
+
