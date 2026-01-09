@@ -21,19 +21,20 @@ int z = point(0, "voxel_z", @ptnum);
 // 读取基础体素信息（与 marchCubeForBoundaryVEX.txt 一致）
 vector base_voxel_size;
 vector min_bound = point(0, "min_bound", @ptnum);
-int base_voxel_scale;
 vector voxel_size = point(0, "voxel_size", @ptnum);
 int voxel_scale = point(0, "voxel_scale", @ptnum);
 
-// 如果存在 base_voxel_size 和 base_voxel_scale，使用它们（与 marchCubeForBoundaryVEX 一致）
+// 如果存在 base_voxel_size，使用它（与 marchCubeForBoundaryVEX 一致）
+// base_voxel_scale 固定为 1，不需要读取
 if (hasattrib(0, "point", "base_voxel_size")) {
     base_voxel_size = point(0, "base_voxel_size", @ptnum);
-    base_voxel_scale = point(0, "base_voxel_scale", @ptnum);
 } else {
     // 如果没有 base_voxel_size，使用 voxel_size 作为基础值
     base_voxel_size = voxel_size;
-    base_voxel_scale = voxel_scale;
 }
+
+// 直接使用已设置的 voxel_scale（所有 cell 生成脚本都已设置）
+// 不需要从 lod_level 重新计算
 
 // 确定坐标系原点（优先使用 chunk_origin）
 vector origin;
@@ -44,16 +45,9 @@ if (hasattrib(0, "point", "chunk_origin")) {
 }
 
 // Regular cell 或 boundary cell：8 个角点
-// 计算 8 个角点的位置（upper corner 语义）
-// 角点顺序（与 pointsVEX.txt 和 marchCubeVEX.txt 一致）：
-// [0] = (x-voxel_scale, y-voxel_scale, z-voxel_scale) - 左下后角
-// [1] = (x,            y-voxel_scale, z-voxel_scale) - 右下后角
-// [2] = (x-voxel_scale,y,             z-voxel_scale) - 左上后角
-// [3] = (x,            y,             z-voxel_scale) - 右上后角
-// [4] = (x-voxel_scale,y-voxel_scale, z)            - 左下前角
-// [5] = (x,            y-voxel_scale, z)            - 右下前角
-// [6] = (x-voxel_scale,y,             z)            - 左上前角
-// [7] = (x,            y,             z)            - 右上前角
+// 统一使用 upper corner 语义（与 boundaryCellVEX、transCellVEX 和 regularCellVEX 一致）
+// voxel_x/y/z 是 upper corner 坐标（右上前角）
+// 角点范围是 (x-voxel_scale, y-voxel_scale, z-voxel_scale) 到 (x, y, z)
 vector corners[];
 resize(corners, 8);
 

@@ -1,12 +1,12 @@
 // VEX Code for Point Wrangle
 // 从 input1 读取 Marching Cubes 查找表数据
-// Input 0: 体素点云（来自 chunkVEX.txt 或 pointsVEX.txt）
+// Input 0: 体素点云（来自 chunkVEX.txt、regularCellVEX.txt 或 pointsVEX.txt）
 // Input 1: 查找表数据（Detail Wrangle 节点）
 // Input 2: fog VDB volume（用于实时采样密度值）
 // 
 // LOD 处理：
-// - chunkVEX 生成最高分辨率（32x32x32）的体素点
-// - 本节点根据 lodLevel 参数进行 LOD 处理：
+// - 如果输入来自 regularCellVEX：LOD 过滤已经在 regularCellVEX 中完成，本节点只负责三角化
+// - 如果输入来自 chunkVEX：本节点根据 lodLevel 参数进行 LOD 处理：
 //   * lodLevel = 0: 使用所有体素（最高分辨率）
 //   * lodLevel = 1: 每 2 个体素采样一个（体素大小变为 2 倍）
 //   * lodLevel = 2: 每 4 个体素采样一个（体素大小变为 4 倍）
@@ -81,7 +81,13 @@ vector ProjectToTangentPlane(vector offset; vector normal) {
 
 // --- 主函数 ---
 float isolevel = chf("isolevel"); // 从通道获取isolevel
-int lod_level = chi("lodLevel");  // 从通道获取 LOD 级别
+
+// 读取 LOD 级别：优先从点属性读取（如果来自 regularCellVEX），否则从参数读取
+int lod_level = chi("lodLevel");  // 从通道获取 LOD 级别（默认值）
+if (hasattrib(0, "point", "lod_level")) {
+    // 如果点属性中有 lod_level，使用点属性的值（来自 regularCellVEX）
+    lod_level = point(0, "lod_level", @ptnum);
+}
 
 // 确保 lodLevel 非负
 lod_level = max(lod_level, 0);
@@ -96,11 +102,23 @@ int lod_scale = (int)pow(2.0, lod_level);  // 2^lodLevel: 1, 2, 4, 8, 16, 32, ..
 // 读取基础体素信息
 vector base_voxel_size = point(0, "voxel_size", @ptnum);
 vector min_bound = point(0, "min_bound", @ptnum);
-int base_voxel_scale = point(0, "voxel_scale", @ptnum);
 
-// 根据 LOD 级别调整体素大小和缩放
+// base_voxel_scale 固定为 1（chunkVEX 总是输出 voxel_scale = 1）
+int base_voxel_scale = 1;
+
+// 优先使用已设置的 voxel_scale（如果输入来自 regularCellVEX/boundaryCellVEX/transCellVEX）
+// 如果 voxel_scale 已经大于 1，说明已经正确设置，直接使用
+// 否则根据 LOD 级别计算（向后兼容直接来自 chunkVEX 的输入）
+int voxel_scale;
+int read_voxel_scale = point(0, "voxel_scale", @ptnum);
+if (read_voxel_scale > 1) {
+    voxel_scale = read_voxel_scale;  // 使用已设置的 voxel_scale
+} else {
+    voxel_scale = lod_scale;  // base_voxel_scale = 1，所以直接使用 lod_scale
+}
+
+// 根据 LOD 级别调整体素大小
 vector voxel_size = base_voxel_size * lod_scale;
-int voxel_scale = base_voxel_scale * lod_scale;
 
 // 检查是否为边界低分辨率体素（如果存在该属性）
 int is_boundary_lowres = 0;
@@ -108,19 +126,13 @@ if (hasattrib(0, "point", "is_boundary_lowres")) {
     is_boundary_lowres = point(0, "is_boundary_lowres", @ptnum);
 }
 
-// 根据 LOD 级别过滤体素：只处理符合当前 LOD 级别的体素
-// 例如，如果 lodLevel = 1，只处理 x, y, z 都是偶数的体素
+// 读取体素索引
 int x = point(0, "voxel_x", @ptnum);
 int y = point(0, "voxel_y", @ptnum);
 int z = point(0, "voxel_z", @ptnum);
 
-// 如果体素索引不能被 lod_scale 整除，跳过该体素
-if (lod_level > 0) {
-    if ((x % lod_scale != 0) || (y % lod_scale != 0) || (z % lod_scale != 0)) {
-        @group_del = 1;  // 标记删除不符合当前 LOD 级别的体素
-        return;
-    }
-}
+// 注意：如果输入来自 regularCellVEX，LOD 过滤已经在 regularCellVEX 中完成
+// 所以这里不需要再做 LOD 过滤，直接处理所有输入的点
 
 // 角点索引映射（与computeTrianglesForVoxel中的cornerOffsets对应）
 // computeTrianglesForVoxel使用的角点顺序：
@@ -175,29 +187,50 @@ if (hasattrib(0, "point", "chunk_origin")) {
     origin = point(0, "min_bound", @ptnum);
 }
 
-// 实时计算8个角点的世界坐标位置并从 VDB 采样密度值（与 MarchingCubesCS.usf 一致）
-// 注意：在 chunkVEX.txt 中，体素索引 x, y, z 从 0 开始（0, 1, 2, ..., 31）
-// 角点范围是 (x, y, z) 到 (x+1, y+1, z+1) 当 lodLevel = 0 时
-// 角点范围是 (x, y, z) 到 (x+lod_scale, y+lod_scale, z+lod_scale) 当 lodLevel > 0 时
+// 实时计算8个角点的世界坐标位置并从 VDB 采样密度值
+// 重要：现在统一使用 upper corner 语义（与 boundaryCellVEX 和 transCellVEX 一致）
+// 如果输入来自 regularCellVEX：voxel_x/y/z 是 upper corner 坐标
+// 如果输入来自 chunkVEX（直接）：voxel_x/y/z 是 lower corner 坐标，需要检测并适配
+// 
+// Upper corner 语义：
+// - voxel_x/y/z 是 upper corner 坐标（右上前角）
+// - 角点范围是 (x-voxel_scale, y-voxel_scale, z-voxel_scale) 到 (x, y, z)
+// - 与 boundaryCellVEX 和 transCellVEX 一致
+
+// 检测输入语义：如果存在 lod_level 属性，说明来自 regularCellVEX（upper corner）
+// 否则可能来自 chunkVEX（lower corner），需要转换
+int use_upper_corner = 0;
+if (hasattrib(0, "point", "lod_level")) {
+    use_upper_corner = 1;  // 来自 regularCellVEX，已经是 upper corner
+}
+
 for (int i = 0; i < 8; i++) {
     // 计算角点的网格坐标
     // offset 是 (0,0,0) 到 (1,1,1)，表示角点在体素内的相对位置
     vector offset = corner_offsets[i];
     vector corner_coord;
     
-    if (lod_level > 0) {
-        // 当 lod_level > 0 时，x, y, z 是过滤后的体素索引（如 0, 2, 4, 6...）
-        // 角点范围是 (x, y, z) 到 (x+lod_scale, y+lod_scale, z+lod_scale)
-        // 例如：体素索引 0 的角点是 (0,0,0) 到 (2,2,2)，体素索引 2 的角点是 (2,2,2) 到 (4,4,4)
-        corner_coord = set(x + offset.x * lod_scale, 
-                           y + offset.y * lod_scale, 
-                           z + offset.z * lod_scale);
+    if (use_upper_corner) {
+        // Upper corner 语义（来自 regularCellVEX）
+        // voxel_x/y/z 是 upper corner 坐标
+        // 角点范围是 (x-voxel_scale, y-voxel_scale, z-voxel_scale) 到 (x, y, z)
+        // 角点坐标 = x - voxel_scale + offset * voxel_scale
+        corner_coord = set(x - voxel_scale + offset.x * voxel_scale,
+                           y - voxel_scale + offset.y * voxel_scale,
+                           z - voxel_scale + offset.z * voxel_scale);
     } else {
-        // lod_level = 0，直接使用体素索引
-        // 角点范围是 (x, y, z) 到 (x+1, y+1, z+1)
-        corner_coord = set(x + offset.x, 
-                           y + offset.y, 
-                           z + offset.z);
+        // Lower corner 语义（来自 chunkVEX，向后兼容）
+        // voxel_x/y/z 是 lower corner 坐标
+        // 角点范围是 (x, y, z) 到 (x+lod_scale, y+lod_scale, z+lod_scale)
+        if (lod_level > 0) {
+            corner_coord = set(x + offset.x * lod_scale, 
+                               y + offset.y * lod_scale, 
+                               z + offset.z * lod_scale);
+        } else {
+            corner_coord = set(x + offset.x, 
+                               y + offset.y, 
+                               z + offset.z);
+        }
     }
     corner_pos[i] = origin + set(corner_coord.x * base_voxel_size.x, 
                                   corner_coord.y * base_voxel_size.y, 

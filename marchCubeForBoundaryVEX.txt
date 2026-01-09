@@ -277,15 +277,12 @@ for (int i = 0; i < vertex_count; ++i) {
     // 对需要偏移的角点进行切平面投影
     // 使用 base_voxel_size * voxel_scale 作为体素大小用于梯度计算
     vector cell_voxel_size = base_voxel_size * voxel_scale;
-    // 补一圈 ring：关闭 half-thickness 偏移（否则投影可能把点推到 chunk 外，导致三角面“出界”）
-    if (is_makeup_ring == 1) {
-        need_offset_c1 = 0;
-        need_offset_c2 = 0;
-    }
+    // 补一圈 ring：仍然应用 half-thickness 偏移，但使用 ApplyOffsetClamped 限制在边界内
     if (need_offset_c1) {
         vector normal1 = ComputeGradient(p1, cell_voxel_size);
         vector projected_offset1 = ProjectToTangentPlane(offset_direction, normal1);
         // 不直接 clamp 点位，改为把 offset 按比例缩小到不越界，避免折叠/自相交
+        // 对于 makeup ring，这确保偏移不会把点推到 chunk 外
         p1 = ApplyOffsetClamped(p1, projected_offset1, chunk_min, chunk_max);
     }
     if (need_offset_c2) {
@@ -351,3 +348,4 @@ for (int i = 0; i < triangle_count * 3; i += 3) {
 
 // 标记删除当前点阵点
 @group_del = 1;
+

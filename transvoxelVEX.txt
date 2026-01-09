@@ -82,6 +82,28 @@ vector ProjectToTangentPlane(vector offset; vector normal) {
     return offset - dot_product * normal;
 }
 
+// 将"偏移"限制在 AABB 内：不直接 clamp 点位（会造成折叠/自相交），而是按比例缩小 offset
+vector ApplyOffsetClamped(vector p; vector offset; vector bmin; vector bmax) {
+    float t = 1.0;
+    // X
+    if (abs(offset.x) > 1e-12) {
+        if (offset.x > 0) t = min(t, (bmax.x - p.x) / offset.x);
+        else              t = min(t, (bmin.x - p.x) / offset.x);
+    }
+    // Y
+    if (abs(offset.y) > 1e-12) {
+        if (offset.y > 0) t = min(t, (bmax.y - p.y) / offset.y);
+        else              t = min(t, (bmin.y - p.y) / offset.y);
+    }
+    // Z
+    if (abs(offset.z) > 1e-12) {
+        if (offset.z > 0) t = min(t, (bmax.z - p.z) / offset.z);
+        else              t = min(t, (bmin.z - p.z) / offset.z);
+    }
+    t = clamp(t, 0.0, 1.0);
+    return p + offset * t;
+}
+
 // --- 主函数 ---
 float isolevel = chf("isolevel");
 
@@ -117,6 +139,31 @@ int boundary_axis = 2;
 if (hasattrib(0, "point", "boundary_axis")) {
     boundary_axis = point(0, "boundary_axis", @ptnum);
 }
+
+// 补一圈标记：边/角 ring 往往缺少完整邻域，half-thickness 投影偏移可能把点推到 chunk 外
+int is_makeup_ring = 0;
+if (hasattrib(0, "point", "is_makeup_ring")) {
+    is_makeup_ring = point(0, "is_makeup_ring", @ptnum);
+}
+
+// 计算 chunk 边界（用于 clamp，避免补一圈导致三角面出界）
+vector origin;
+if (hasattrib(0, "point", "chunk_origin")) {
+    origin = point(0, "chunk_origin", @ptnum);
+} else {
+    origin = min_bound;
+}
+
+float chunk_size = 16.0;
+int voxel_res_attr = 32;
+if (hasattrib(0, "point", "chunk_size")) {
+    chunk_size = point(0, "chunk_size", @ptnum);
+}
+if (hasattrib(0, "point", "voxel_res")) {
+    voxel_res_attr = point(0, "voxel_res", @ptnum);
+}
+vector chunk_min = origin;
+vector chunk_max = origin + set(chunk_size, chunk_size, chunk_size);
 
 // 按照 MarchingCubesCS.usf 的方式：从体素索引实时计算角点位置和采样密度值
 vector trans_corner_pos[];
@@ -262,6 +309,14 @@ trans_corner_val[11] = trans_corner_val[6];
 trans_corner_pos[12] = trans_corner_pos[8];
 trans_corner_val[12] = trans_corner_val[8];
 
+// 补一圈处理：如果角点位置超出 chunk 边界，将其 clamp 到边界内
+// 这确保补充的一圈 transition cell 与 boundary cell 能正确衔接
+if (is_makeup_ring == 1) {
+    for (int i = 0; i < 13; i++) {
+        trans_corner_pos[i] = clamp(trans_corner_pos[i], chunk_min, chunk_max);
+    }
+}
+
 // 计算 transition cube index（使用 9 个角点）
 int transCubeIndex = 0;
 if (trans_corner_val[0] <= isolevel) transCubeIndex |= 1;
@@ -356,15 +411,18 @@ for (int i = 0; i < vertex_count; ++i) {
     float isovalue2 = trans_corner_val[c2];
     
     // half-thickness：对低分辨率面的角点（corner >= 9）做轴向偏移
+    // 补一圈 ring：仍然应用 half-thickness 偏移，但使用 ApplyOffsetClamped 限制在边界内
     if (c1 >= 9) {
         vector normal1 = ComputeGradient(cornerPos1, base_voxel_size);
         vector projected_offset1 = ProjectToTangentPlane(offset_direction, normal1);
-        cornerPos1 += projected_offset1;
+        // 不直接 clamp 点位，改为把 offset 按比例缩小到不越界，避免折叠/自相交
+        // 对于 makeup ring，这确保偏移不会把点推到 chunk 外
+        cornerPos1 = ApplyOffsetClamped(cornerPos1, projected_offset1, chunk_min, chunk_max);
     }
     if (c2 >= 9) {
         vector normal2 = ComputeGradient(cornerPos2, base_voxel_size);
         vector projected_offset2 = ProjectToTangentPlane(offset_direction, normal2);
-        cornerPos2 += projected_offset2;
+        cornerPos2 = ApplyOffsetClamped(cornerPos2, projected_offset2, chunk_min, chunk_max);
     }
     
     // 使用插值计算顶点位置

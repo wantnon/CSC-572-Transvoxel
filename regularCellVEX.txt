@@ -1,0 +1,166 @@
+// VEX Code for Detail Wrangle - 从 chunkVEX 输出中过滤出 regular cell 点
+// 重要：此代码必须在 Detail Wrangle 节点中使用（Run Over=Detail）！
+// Input 0: chunkVEX 输出的体素点云
+//
+// 功能：
+// - 根据当前 chunk 的 lodLevel 进行 LOD 过滤
+// - 排除边界处的点（如果相邻 chunk 的 LOD 不同，边界处会生成 transCell 或 boundaryCell）
+// - 直接删除不符合条件的点，并更新保留点的位置到当前 LOD cell 的中心
+// - 输出 regular cell 的点，这些点可以传递给 marchCubeVEX_modify 进行三角化
+// 注意：不采样 VDB 密度值，密度值采样在 marchCubeVEX_modify 中进行
+//
+// 参数：
+// - lodLevel: 当前 chunk 的 LOD 级别
+// - lodLevel_X_positive, lodLevel_X_negative: X 轴正/负方向的相邻 chunk 的 LOD 级别
+// - lodLevel_Y_positive, lodLevel_Y_negative: Y 轴正/负方向的相邻 chunk 的 LOD 级别
+// - lodLevel_Z_positive, lodLevel_Z_negative: Z 轴正/负方向的相邻 chunk 的 LOD 级别
+//   如果某个方向没有相邻 chunk，可以设置为 -1
+
+// --- 获取参数 ---
+int lod_level = chi("lodLevel");  // 当前 chunk 的 LOD 级别
+int lod_level_X_positive = chi("lodLevel_X_positive");
+int lod_level_X_negative = chi("lodLevel_X_negative");
+int lod_level_Y_positive = chi("lodLevel_Y_positive");
+int lod_level_Y_negative = chi("lodLevel_Y_negative");
+int lod_level_Z_positive = chi("lodLevel_Z_positive");
+int lod_level_Z_negative = chi("lodLevel_Z_negative");
+
+// 确保 lodLevel 非负
+lod_level = max(lod_level, 0);
+
+// 计算 LOD 缩放
+int lod_scale = (int)pow(2.0, lod_level);  // 2^lodLevel: 1, 2, 4, 8, 16, 32, ...
+
+// 读取 chunk 信息（从第一个点获取，假设所有点来自同一个 chunk）
+int voxel_res = 32;  // 默认分辨率
+float chunk_size = 16.0;
+vector base_voxel_size = set(0.5, 0.5, 0.5);
+vector origin = set(0, 0, 0);
+
+// base_voxel_scale 固定为 1（chunkVEX 总是输出 voxel_scale = 1）
+int base_voxel_scale = 1;
+if (npoints(0) > 0) {
+    int first_pt = 0;
+    if (hasattrib(0, "point", "chunk_size")) {
+        chunk_size = point(0, "chunk_size", first_pt);
+    }
+    if (hasattrib(0, "point", "voxel_size")) {
+        base_voxel_size = point(0, "voxel_size", first_pt);
+        if (base_voxel_size.x > 0) {
+            voxel_res = (int)(chunk_size / base_voxel_size.x);
+        }
+    }
+    if (hasattrib(0, "point", "min_bound")) {
+        origin = point(0, "min_bound", first_pt);
+    }
+    if (hasattrib(0, "point", "chunk_origin")) {
+        origin = point(0, "chunk_origin", first_pt);
+    }
+}
+
+// --- 从后往前遍历所有点，直接删除不符合条件的点 ---
+// 从后往前遍历可以避免删除时索引变化的问题
+int num_points = npoints(0);
+for (int i = num_points - 1; i >= 0; i--) {
+    // 读取当前点的体素索引
+    int x = point(0, "voxel_x", i);
+    int y = point(0, "voxel_y", i);
+    int z = point(0, "voxel_z", i);
+    
+    // 标记是否需要删除
+    int should_delete = 0;
+    
+    // --- LOD 过滤：只保留符合当前 LOD 级别的体素 ---
+    if (lod_level > 0) {
+        if ((x % lod_scale != 0) || (y % lod_scale != 0) || (z % lod_scale != 0)) {
+            should_delete = 1;
+        }
+    }
+    
+    // --- 边界过滤：排除边界处的点（如果相邻 chunk 的 LOD 不同）---
+    // 重要：只有当当前 chunk 是低分辨率侧（lod_level > 0）时，才需要排除边界层
+    // 因为：
+    // - 如果当前 chunk 是高分辨率侧（lod_level = 0），边界处会生成 transCell（由 transCellVEX 处理）
+    //   但 regularCell 应该保留所有点，不需要删除边界层
+    // - 如果当前 chunk 是低分辨率侧（lod_level > 0），边界处会生成 boundaryCell（由 boundaryCellVEX 处理）
+    //   所以需要排除边界层，避免与 boundaryCell 重复
+    //
+    // 注意：由于已经经过 LOD 过滤，x/y/z 的值都是 lod_scale 的倍数
+    // 所以边界过滤应该排除边界处的所有符合 LOD 的点
+    
+    if (!should_delete && lod_level > 0) {
+        // 只在高分辨率侧（lod_level > 0）时执行边界过滤
+        // 注意：x/y/z 目前是 lower corner（来自 chunkVEX），但后续会转换为 upper corner
+        // 边界检查需要基于 lower corner 进行，因为边界过滤在转换之前
+        // X 方向边界
+        if (lod_level_X_negative != lod_level && lod_level_X_negative >= 0) {
+            // 负方向边界：lower corner x == 0 的点需要排除
+            if (x == 0) {
+                should_delete = 1;
+            }
+        }
+        if (lod_level_X_positive != lod_level && lod_level_X_positive >= 0) {
+            // 正方向边界：lower corner x >= voxel_res - lod_scale 的点需要排除
+            // 转换为 upper corner 后，这些点会是 x >= voxel_res
+            if (x >= voxel_res - lod_scale) {
+                should_delete = 1;
+            }
+        }
+        
+        // Y 方向边界
+        if (lod_level_Y_negative != lod_level && lod_level_Y_negative >= 0) {
+            if (y == 0) {
+                should_delete = 1;
+            }
+        }
+        if (lod_level_Y_positive != lod_level && lod_level_Y_positive >= 0) {
+            if (y >= voxel_res - lod_scale) {
+                should_delete = 1;
+            }
+        }
+        
+        // Z 方向边界
+        if (lod_level_Z_negative != lod_level && lod_level_Z_negative >= 0) {
+            if (z == 0) {
+                should_delete = 1;
+            }
+        }
+        if (lod_level_Z_positive != lod_level && lod_level_Z_positive >= 0) {
+            if (z >= voxel_res - lod_scale) {
+                should_delete = 1;
+            }
+        }
+    }
+    
+    // 如果不符合条件，直接删除该点
+    if (should_delete) {
+        removepoint(0, i);
+    } else {
+        // 如果通过了所有过滤，保留该点
+        // 重要：将 voxel_x/y/z 从 lower corner 转换为 upper corner 语义（与 boundaryCellVEX 和 transCellVEX 一致）
+        // chunkVEX 输出的 x/y/z 是 lower corner（0-based 网格索引）
+        // upper corner = lower corner + lod_scale
+        int x_upper = x + lod_scale;
+        int y_upper = y + lod_scale;
+        int z_upper = z + lod_scale;
+        
+        // 更新 voxel_x/y/z 为 upper corner 坐标
+        setpointattrib(0, "voxel_x", i, x_upper);
+        setpointattrib(0, "voxel_y", i, y_upper);
+        setpointattrib(0, "voxel_z", i, z_upper);
+        
+        // 更新位置到当前 LOD cell 的中心（upper corner 语义）
+        // upper corner 的中心 = (x_upper - voxel_scale * 0.5) * base_voxel_size
+        vector new_pos = origin + set((x_upper - lod_scale * 0.5) * base_voxel_size.x,
+                                      (y_upper - lod_scale * 0.5) * base_voxel_size.y,
+                                      (z_upper - lod_scale * 0.5) * base_voxel_size.z);
+        setpointattrib(0, "P", i, new_pos);
+        
+        // 设置 voxel_scale（base_voxel_scale 固定为 1，所以 voxel_scale = lod_scale）
+        setpointattrib(0, "voxel_scale", i, lod_scale);
+        
+        // 存储 lod_level 属性，供下游节点使用
+        setpointattrib(0, "lod_level", i, lod_level);
+    }
+}
+
