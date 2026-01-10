@@ -29,6 +29,16 @@ int lod_level_1 = chi("lodLevel1");  // trunk1 的 LOD 级别
 lod_level_0 = max(lod_level_0, 0);
 lod_level_1 = max(lod_level_1, 0);
 
+// 重要：当两侧 LOD 相同（例如 1 vs 1）时，不应生成 boundary cell
+// boundary cell 只用于“transition cell 与低分辨率区域之间”的补齐
+if (lod_level_0 == lod_level_1) {
+    int npt = npoints(0);
+    for (int i = npt - 1; i >= 0; --i) {
+        removepoint(0, i);
+    }
+    return;
+}
+
 // 从 trunk0 和 trunk1 获取基础信息
 vector min_bound_0, min_bound_1;
 vector chunk_origin_0, chunk_origin_1;
@@ -322,5 +332,7 @@ if (boundary_axis == 0) {
         }
     }
 }
+
+
 
 

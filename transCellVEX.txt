@@ -20,6 +20,17 @@ int lod_level_1 = chi("lodLevel1");  // trunk1 的 LOD 级别
 lod_level_0 = max(lod_level_0, 0);
 lod_level_1 = max(lod_level_1, 0);
 
+// 重要：当两侧 LOD 相同（例如 1 vs 1）时，不应生成 transition cell
+// 否则会出现不该存在的 transTris，绕序/法线在某些方向上看起来“反了”
+if (lod_level_0 == lod_level_1) {
+    // 清除输入点并直接返回（输出空几何）
+    int npt = npoints(0);
+    for (int i = npt - 1; i >= 0; --i) {
+        removepoint(0, i);
+    }
+    return;
+}
+
 // 从 trunk0 和 trunk1 获取基础信息
 vector min_bound_0, min_bound_1;
 vector chunk_origin_0, chunk_origin_1;
@@ -120,6 +131,17 @@ int abs_chunk_z = abs(chunk_diff_z);
 // 找出差异最大的方向，那就是边界方向
 int boundary_axis = 2;  // 默认 Z 方向 (0=X, 1=Y, 2=Z)
 int lod_boundary;
+// 穷举法：为所有可能的边界方向和高分辨率位置组合生成明确的 winding_case 标识
+// winding_case = boundary_axis * 2 + (high_res_in_positive ? 1 : 0)
+// 这样可以精确控制每种情况下的绕序翻转，避免符号计算的歧义
+// 0: X轴边界, 高分辨率在负方向 (chunk_diff < 0)
+// 1: X轴边界, 高分辨率在正方向 (chunk_diff > 0)
+// 2: Y轴边界, 高分辨率在负方向
+// 3: Y轴边界, 高分辨率在正方向
+// 4: Z轴边界, 高分辨率在负方向
+// 5: Z轴边界, 高分辨率在正方向
+int winding_case = 4;  // 默认 Z轴负方向
+int boundary_sign = -1;  // 兼容性保留（但主要用 winding_case）
 
 if (abs_chunk_x >= abs_chunk_y && abs_chunk_x >= abs_chunk_z) {
     // X 方向边界
@@ -141,14 +163,16 @@ if (abs_chunk_x >= abs_chunk_y && abs_chunk_x >= abs_chunk_z) {
     int lod_scale_highres = use_trunk1_coord ? lod_scale_0 : lod_scale_1;
     if (chunk_diff > 0) {
         lod_boundary = voxel_res - 1;  // 高分辨率 trunk 在正方向，边界在最后一层
+        winding_case = 1;  // X轴正方向
+        boundary_sign = 1;
     } else if (chunk_diff < 0) {
-        // 高分辨率 trunk 在负方向，边界在第一层
-        // 需要考虑对齐：transition cell 的高分辨率面应该与高分辨率 trunk 对齐
-        // 由于中心点计算会减去 voxel_scale * 0.5，所以边界位置需要加上 voxel_scale
-        // 这样中心点才会在正确的位置
-        lod_boundary = voxel_scale;  // 边界在第一层，但需要考虑中心点计算的偏移
+        lod_boundary = voxel_scale;  // 边界在第一层
+        winding_case = 0;  // X轴负方向
+        boundary_sign = -1;
     } else {
-        lod_boundary = voxel_res / 2;  // 如果相同，使用中间值
+        lod_boundary = voxel_res / 2;
+        winding_case = 0;  // 默认负方向（与 C++ 约定一致）
+        boundary_sign = -1;
     }
 } else if (abs_chunk_y >= abs_chunk_x && abs_chunk_y >= abs_chunk_z) {
     // Y 方向边界
@@ -162,10 +186,16 @@ if (abs_chunk_x >= abs_chunk_y && abs_chunk_x >= abs_chunk_z) {
     
     if (chunk_diff > 0) {
         lod_boundary = voxel_res - 1;
+        winding_case = 3;  // Y轴正方向
+        boundary_sign = 1;
     } else if (chunk_diff < 0) {
-        lod_boundary = voxel_scale;  // 边界在第一层，但需要考虑中心点计算的偏移
+        lod_boundary = voxel_scale;
+        winding_case = 2;  // Y轴负方向
+        boundary_sign = -1;
     } else {
         lod_boundary = voxel_res / 2;
+        winding_case = 2;  // 默认负方向
+        boundary_sign = -1;
     }
 } else {
     // Z 方向边界（默认）
@@ -179,10 +209,16 @@ if (abs_chunk_x >= abs_chunk_y && abs_chunk_x >= abs_chunk_z) {
     
     if (chunk_diff > 0) {
         lod_boundary = voxel_res - 1;
+        winding_case = 5;  // Z轴正方向
+        boundary_sign = 1;
     } else if (chunk_diff < 0) {
-        lod_boundary = voxel_scale;  // 边界在第一层，但需要考虑中心点计算的偏移
+        lod_boundary = voxel_scale;
+        winding_case = 4;  // Z轴负方向（默认，与 C++ 约定一致）
+        boundary_sign = -1;
     } else {
         lod_boundary = voxel_res / 2;
+        winding_case = 4;  // 默认负方向
+        boundary_sign = -1;
     }
 }
 
@@ -236,6 +272,10 @@ if (boundary_axis == 0) {
             // 标记为 transition cell
             setpointattrib(0, "is_transition", pt, 1);
             setpointattrib(0, "boundary_axis", pt, boundary_axis);
+            // 穷举法的绕序 case 标识：用于 transvoxelVEX 精确查表决定是否需要翻转
+            setpointattrib(0, "winding_case", pt, winding_case);
+            // 兼容性保留（但主要用 winding_case）
+            setpointattrib(0, "boundary_sign", pt, boundary_sign);
             // 补一圈标记：用于下游在边/角处做保护（避免 half-thickness 偏移把点推到 chunk 外）
             int is_makeup_ring = (y == voxel_res) || (z == voxel_res);
             setpointattrib(0, "is_makeup_ring", pt, is_makeup_ring);
@@ -287,6 +327,7 @@ if (boundary_axis == 0) {
             // 标记为 transition cell
             setpointattrib(0, "is_transition", pt, 1);
             setpointattrib(0, "boundary_axis", pt, boundary_axis);
+            setpointattrib(0, "boundary_sign", pt, boundary_sign);
             // 补一圈标记：用于下游在边/角处做保护（避免 half-thickness 偏移把点推到 chunk 外）
             int is_makeup_ring = (x == voxel_res) || (z == voxel_res);
             setpointattrib(0, "is_makeup_ring", pt, is_makeup_ring);
@@ -338,6 +379,7 @@ if (boundary_axis == 0) {
             // 标记为 transition cell
             setpointattrib(0, "is_transition", pt, 1);
             setpointattrib(0, "boundary_axis", pt, boundary_axis);
+            setpointattrib(0, "boundary_sign", pt, boundary_sign);
             // 补一圈标记：用于下游在边/角处做保护（避免 half-thickness 偏移把点推到 chunk 外）
             int is_makeup_ring = (x == voxel_res) || (y == voxel_res);
             setpointattrib(0, "is_makeup_ring", pt, is_makeup_ring);

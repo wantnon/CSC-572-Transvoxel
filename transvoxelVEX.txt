@@ -140,6 +140,20 @@ if (hasattrib(0, "point", "boundary_axis")) {
     boundary_axis = point(0, "boundary_axis", @ptnum);
 }
 
+// 穷举法的绕序 case 标识（更可靠，避免符号计算的歧义）
+// 0: X轴负方向, 1: X轴正方向, 2: Y轴负方向, 3: Y轴正方向, 4: Z轴负方向, 5: Z轴正方向
+// C++ 版本的查找表默认是 case 4 (Z轴负方向，axis=NegativeZ)
+int winding_case = 4;  // 默认 Z轴负方向（与 C++ 约定一致）
+if (hasattrib(0, "point", "winding_case")) {
+    winding_case = point(0, "winding_case", @ptnum);
+}
+
+// 兼容性保留（但主要用 winding_case）
+int boundary_sign = -1;
+if (hasattrib(0, "point", "boundary_sign")) {
+    boundary_sign = point(0, "boundary_sign", @ptnum);
+}
+
 // 补一圈标记：边/角 ring 往往缺少完整邻域，half-thickness 投影偏移可能把点推到 chunk 外
 int is_makeup_ring = 0;
 if (hasattrib(0, "point", "is_makeup_ring")) {
@@ -371,19 +385,21 @@ float offset_amount;
 
 if (boundary_axis == 0) {
     // X 方向边界：偏移沿 X 轴
-    axis = 1;  // Positive X（朝向高分辨率侧）
+    // 轴方向取决于高分辨率在正/负方向
+    axis = (boundary_sign > 0) ? 1 : 2;
     offset_amount = voxel_scale * base_voxel_size.x * 0.5;
-    offset_direction = set(offset_amount, 0, 0);
+    // 规范：偏移方向取“从高分辨率面指向低分辨率面”的方向（与 C++ 里 axis=NegativeZ 时做 +Z 偏移一致）
+    offset_direction = set(-boundary_sign * offset_amount, 0, 0);
 } else if (boundary_axis == 1) {
     // Y 方向边界：偏移沿 Y 轴
-    axis = 4;  // Positive Y（朝向高分辨率侧）
+    axis = (boundary_sign > 0) ? 4 : 8;
     offset_amount = voxel_scale * base_voxel_size.y * 0.5;
-    offset_direction = set(0, offset_amount, 0);
+    offset_direction = set(0, -boundary_sign * offset_amount, 0);
 } else {
     // Z 方向边界（默认）：偏移沿 Z 轴
-    axis = 32;  // Negative Z（朝向高分辨率侧）
+    axis = (boundary_sign > 0) ? 16 : 32;
     offset_amount = voxel_scale * base_voxel_size.z * 0.5;
-    offset_direction = set(0, 0, offset_amount);
+    offset_direction = set(0, 0, -boundary_sign * offset_amount);
 }
 
 int actual_vertex_count = 0;
@@ -444,8 +460,20 @@ for (int i = 0; i < triangle_count * 3; i += 3) {
         continue;
     }
     
-    // 如果该 case 是"反相等价类"，需要反转绕序
-    if (transInvertWinding) {
+    // 穷举法的绕序修正（更可靠，避免符号歧义）：
+    // - transInvertWinding：来自查找表（case 自身需要翻转）
+    // - winding_case：精确标识边界方向和位置关系
+    int flip_winding = transInvertWinding;
+    
+    // 穷举表：基于实际测试结果决定每种 case 是否需要额外翻转
+    // 0: X轴负, 1: X轴正, 2: Y轴负, 3: Y轴正, 4: Z轴负(默认), 5: Z轴正
+    // 查找表基于 case 4 (Z轴负方向)，尝试反向逻辑：只有 case 4 不额外翻转，其他都翻转
+    if (winding_case != 4) {
+        // 除了默认的 Z轴负方向，其他所有 case 都需要额外翻转
+        flip_winding = !flip_winding;
+    }
+    
+    if (flip_winding) {
         int tmp = idx1;
         idx1 = idx2;
         idx2 = tmp;
@@ -464,3 +492,4 @@ for (int i = 0; i < triangle_count * 3; i += 3) {
 
 // 标记删除当前点阵点（三角形已生成，不再需要原始点）
 @group_del = 1;
+
