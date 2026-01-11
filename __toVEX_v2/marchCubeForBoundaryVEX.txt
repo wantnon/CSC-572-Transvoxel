@@ -8,16 +8,9 @@
 // boundary cell 是低分辨率边界 regular cell，用于补齐 transition cell 与低分辨率区域之间的空隙
 // 需要对特定角点做半厚度偏移，使其变成半厚度
 
-// 从 input1 读取查找表数据（detail 属性）
-int regularCellClass[] = detail(1, "regularCellClass");
-int regularCellData[] = detail(1, "regularCellData");
-int regularVertexData[] = detail(1, "regularVertexData");
-
-// 检查查找表是否存在（如果数组为空，可能查找表未连接）
-if (len(regularCellClass) == 0 || len(regularCellData) == 0 || len(regularVertexData) == 0) {
-    @group_del = 1;  // 查找表未连接或为空
-    return;
-}
+// 用法（写在 Wrangle 的 VEXpression 里）：
+//   #include "marchCubeForBoundaryVEX.txt"
+//   marchCubeForBoundary_main(@ptnum);
 
 // 线性插值计算交点（与computeTrianglesForVoxel中的插值方式完全一致）
 vector VertexLerp(float isolevel; vector p1, p2; float val1, val2) {
@@ -91,48 +84,67 @@ vector ProjectToTangentPlane(vector offset; vector normal) {
     return offset - dot_product * normal;
 }
 
-// --- 主函数 ---
-float isolevel = chf("isolevel");
-
-// 只处理 boundary cell
-int is_boundary_lowres = 0;
-if (hasattrib(0, "point", "is_boundary_lowres")) {
-    is_boundary_lowres = point(0, "is_boundary_lowres", @ptnum);
+// 标记删除：用 point group "del" 代替 @group_del（避免在自定义函数里出现 @ 语法糖）
+void _mark_del_point(int ptnum)
+{
+    setpointgroup(0, "del", ptnum, 1, "set");
 }
 
-if (is_boundary_lowres != 1) {
-    @group_del = 1;  // 标记删除非 boundary cell 点
-    return;
-}
+// --- 主函数（封装为函数，便于 #include）---
+void marchCubeForBoundary_main(int ptnum)
+{
+    // 从 input1 读取查找表数据（detail 属性）
+    int regularCellClass[] = detail(1, "regularCellClass");
+    int regularCellData[] = detail(1, "regularCellData");
+    int regularVertexData[] = detail(1, "regularVertexData");
 
-// 读取边界方向
-int boundary_axis = 2;  // 默认 Z 方向 (0=X, 1=Y, 2=Z)
-if (hasattrib(0, "point", "boundary_axis")) {
-    boundary_axis = point(0, "boundary_axis", @ptnum);
-}
+    // 检查查找表是否存在（如果数组为空，可能查找表未连接）
+    if (len(regularCellClass) == 0 || len(regularCellData) == 0 || len(regularVertexData) == 0) {
+        _mark_del_point(ptnum);  // 查找表未连接或为空
+        return;
+    }
 
-// 读取基础体素信息（与 transvoxelVEX.txt 一致）
-vector base_voxel_size = point(0, "base_voxel_size", @ptnum);
-vector min_bound = point(0, "min_bound", @ptnum);
-int base_voxel_scale = point(0, "base_voxel_scale", @ptnum);
-vector voxel_size = point(0, "voxel_size", @ptnum);
-int voxel_scale = point(0, "voxel_scale", @ptnum);
+    float isolevel = chf("isolevel");
 
-// 读取体素索引
-int x = point(0, "voxel_x", @ptnum);
-int y = point(0, "voxel_y", @ptnum);
-int z = point(0, "voxel_z", @ptnum);
+    // 只处理 boundary cell
+    int is_boundary_lowres = 0;
+    if (hasattrib(0, "point", "is_boundary_lowres")) {
+        is_boundary_lowres = point(0, "is_boundary_lowres", ptnum);
+    }
 
-// 补一圈标记：边/角 ring 往往缺少完整邻域，half-thickness 投影偏移可能把点推到 chunk 外
-int is_makeup_ring = 0;
-if (hasattrib(0, "point", "is_makeup_ring")) {
-    is_makeup_ring = point(0, "is_makeup_ring", @ptnum);
-}
+    if (is_boundary_lowres != 1) {
+        _mark_del_point(ptnum);  // 标记删除非 boundary cell 点
+        return;
+    }
+
+    // 读取边界方向
+    int boundary_axis = 2;  // 默认 Z 方向 (0=X, 1=Y, 2=Z)
+    if (hasattrib(0, "point", "boundary_axis")) {
+        boundary_axis = point(0, "boundary_axis", ptnum);
+    }
+
+    // 读取基础体素信息（与 transvoxelVEX.txt 一致）
+    vector base_voxel_size = point(0, "base_voxel_size", ptnum);
+    vector min_bound = point(0, "min_bound", ptnum);
+    int base_voxel_scale = point(0, "base_voxel_scale", ptnum);
+    vector voxel_size = point(0, "voxel_size", ptnum);
+    int voxel_scale = point(0, "voxel_scale", ptnum);
+
+    // 读取体素索引
+    int x = point(0, "voxel_x", ptnum);
+    int y = point(0, "voxel_y", ptnum);
+    int z = point(0, "voxel_z", ptnum);
+
+    // 补一圈标记：边/角 ring 往往缺少完整邻域，half-thickness 投影偏移可能把点推到 chunk 外
+    int is_makeup_ring = 0;
+    if (hasattrib(0, "point", "is_makeup_ring")) {
+        is_makeup_ring = point(0, "is_makeup_ring", ptnum);
+    }
 
 // 从体素索引计算角点位置
 vector origin;
 if (hasattrib(0, "point", "chunk_origin")) {
-    origin = point(0, "chunk_origin", @ptnum);
+    origin = point(0, "chunk_origin", ptnum);
 } else {
     origin = min_bound;
 }
@@ -140,7 +152,7 @@ if (hasattrib(0, "point", "chunk_origin")) {
 // 计算 chunk 边界（用于 clamp，避免补一圈导致三角面出界）
 float chunk_size = 16.0;
 if (hasattrib(0, "point", "chunk_size")) {
-    chunk_size = point(0, "chunk_size", @ptnum);
+    chunk_size = point(0, "chunk_size", ptnum);
 } else {
     // fallback：使用 32*base_voxel_size 近似
     chunk_size = 32.0 * base_voxel_size.x;
@@ -191,14 +203,14 @@ if (corner_val[7] <= isolevel) cube_index |= 128;
 
 // 如果体素完全在内部或外部，则跳过
 if (cube_index == 0 || cube_index == 255) {
-    @group_del = 1;
+    _mark_del_point(ptnum);
     return;
 }
 
 // 使用 Marching Cubes 算法（与 marchCubeVEX.txt 一致）
 // 检查 cube_index 是否在有效范围内（应该总是 0-255）
 if (cube_index < 0 || cube_index > 255 || cube_index >= len(regularCellClass)) {
-    @group_del = 1;
+    _mark_del_point(ptnum);
     return;
 }
 
@@ -209,7 +221,7 @@ int baseIndex = cell_class * 16;
 
 // 检查 baseIndex 是否在有效范围内
 if (baseIndex < 0 || baseIndex >= len(regularCellData)) {
-    @group_del = 1;
+    _mark_del_point(ptnum);
     return;
 }
 
@@ -218,7 +230,7 @@ int vertex_count = (geometryCounts / 16) & 0x0F;
 int triangle_count = geometryCounts & 0x0F;
 
 if (vertex_count == 0) {
-    @group_del = 1;
+    _mark_del_point(ptnum);
     return;
 }
 
@@ -301,7 +313,7 @@ int cell_data_base = cell_class * 16 + 1;  // 跳过geometryCounts
 
 // 检查 cell_data_base 是否在有效范围内
 if (cell_data_base < 0 || cell_data_base >= len(regularCellData)) {
-    @group_del = 1;
+    _mark_del_point(ptnum);
     return;
 }
 
@@ -347,5 +359,6 @@ for (int i = 0; i < triangle_count * 3; i += 3) {
 }
 
 // 标记删除当前点阵点
-@group_del = 1;
+_mark_del_point(ptnum);
 
+}

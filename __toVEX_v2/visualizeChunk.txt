@@ -1,48 +1,46 @@
-// VEX Code for Point Wrangle - Transition Cell 线框可视化
-// VEX Code for Point Wrangle - Transition Cell 线框可视化
+// 供 AttribWrangle 使用：把原始脚本包进函数，避免被当作"全局作用域脚本"解析时报错
+// 用法（写在 Point Wrangle 的 VEXpression 里）：
+//   #include "visualizeChunk.txt"
+//   visualizeChunk_main(@ptnum);
+//
+// VEX Code for Point Wrangle - Transition Cell 线框可视化（与 visualizeTransCell.txt 相同）
 // Input 0: transition cell 点云（来自 transCellVEX.txt）
-//
-// 功能：
-// 将每个 transition cell 以线框形式可视化出来
-// Transition cell 有 13 个角点：
-//   - 角点 0-8：高分辨率面的 3x3 网格
-//   - 角点 9-12：低分辨率面的 4 个角点（应用 half-thickness 偏移后）
-//
-// 使用方法：
-// 1. 在 Houdini 中创建一个 Point Wrangle 节点
-// 2. 将 transition cell 点云连接到 Input 0
-// 3. 将此代码复制到 VEXpression 中
-// 4. 在视图中可以看到每个 transition cell 的线框
 
-// --- 主函数 ---
+// 标记删除：用 point group "del" 代替 @group_del（避免在自定义函数里出现 @ 语法糖）
+void _mark_del_point_chunk(int ptnum)
+{
+    setpointgroup(0, "del", ptnum, 1, "set");
+}
 
+void visualizeChunk_main(int ptnum)
+{
 // 只处理 transition cell 点
 int is_transition = 0;
 if (hasattrib(0, "point", "is_transition")) {
-    is_transition = point(0, "is_transition", @ptnum);
+    is_transition = point(0, "is_transition", ptnum);
 }
 
 if (is_transition != 1) {
-    @group_del = 1;  // 标记删除非 transition cell 点
+    _mark_del_point_chunk(ptnum);  // 标记删除非 transition cell 点
     return;
 }
 
 // 读取体素信息
-int x = point(0, "voxel_x", @ptnum);
-int y = point(0, "voxel_y", @ptnum);
-int z = point(0, "voxel_z", @ptnum);
+int x = point(0, "voxel_x", ptnum);
+int y = point(0, "voxel_y", ptnum);
+int z = point(0, "voxel_z", ptnum);
 
 // 读取基础体素信息（与 transvoxelVEX.txt 一致）
-vector base_voxel_size = point(0, "base_voxel_size", @ptnum);
-vector min_bound = point(0, "min_bound", @ptnum);
-int base_voxel_scale = point(0, "base_voxel_scale", @ptnum);
-vector voxel_size = point(0, "voxel_size", @ptnum);
-int voxel_scale = point(0, "voxel_scale", @ptnum);
+vector base_voxel_size = point(0, "base_voxel_size", ptnum);
+vector min_bound = point(0, "min_bound", ptnum);
+int base_voxel_scale = point(0, "base_voxel_scale", ptnum);
+vector voxel_size = point(0, "voxel_size", ptnum);
+int voxel_scale = point(0, "voxel_scale", ptnum);
 
 // 读取边界方向（0=X, 1=Y, 2=Z，默认 Z）
 int boundary_axis = 2;
 if (hasattrib(0, "point", "boundary_axis")) {
-    boundary_axis = point(0, "boundary_axis", @ptnum);
+    boundary_axis = point(0, "boundary_axis", ptnum);
 }
 
 // 使用 min_bound 作为原点（与 transvoxelVEX.txt 一致）
@@ -227,5 +225,6 @@ for (int i = num_prims - 20; i < num_prims; i++) {
 }
 
 // 标记删除原始点（可选，如果想保留原始点可以注释掉）
-// @group_del = 1;
+// 如需要删除，在调用函数后使用：setpointgroup(0, "del", @ptnum, 1, "set");
+}
 

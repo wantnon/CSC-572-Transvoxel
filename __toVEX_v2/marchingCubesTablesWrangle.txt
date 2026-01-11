@@ -1,7 +1,14 @@
+// 供 AttribWrangle 使用：把原始脚本包进函数，避免被当作"全局作用域脚本"解析时报错
+// 用法（写在 Detail Wrangle 的 VEXpression 里）：
+//   #include "marchingCubesTablesWrangle.txt"
+//   marchingCubesTables_main();
+//
 // Detail Wrangle - 存储 Marching Cubes 查找表数据
 // 此节点将查找表数据存储为 detail 属性，供其他节点通过 input1 读取
 // Input: 任意几何体（可以是空几何体，或一个点）
 
+void marchingCubesTables_main()
+{
 // regularCellClass: 256 个元素
 int regularCellClass[] = {
     0x00, 0x01, 0x01, 0x03, 0x01, 0x03, 0x02, 0x04, 0x01, 0x02, 0x03, 0x04, 0x03, 0x04, 0x04, 0x03,
@@ -1001,3 +1008,4 @@ setdetailattrib(0, "transitionCellClass", transitionCellClass);
 setdetailattrib(0, "transitionCellData", transitionCellData);
 // transitionVertexData 已包含完整数据（6144 个元素）
 setdetailattrib(0, "transitionVertexData", transitionVertexData);
+}

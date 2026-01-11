@@ -1,33 +1,32 @@
+// 供 AttribWrangle 使用：把原始脚本包进函数，避免被当作"全局作用域脚本"解析时报错
+// 用法（写在 Point Wrangle 的 VEXpression 里）：
+//   #include "visualizeCell.txt"
+//   visualizeCell_main(@ptnum);
+//
 // VEX Code for Point Wrangle - Cell 线框可视化
 // Input 0: 体素点云（来自 chunkVEX.txt, boundaryCellVEX.txt 等）
 //
 // 功能：
 // 将每个 cell 以线框形式可视化出来
 // 支持 regular cell 和 boundary cell
-//
-// 使用方法：
-// 1. 在 Houdini 中创建一个 Point Wrangle 节点
-// 2. 将体素点云连接到 Input 0
-// 3. 将此代码复制到 VEXpression 中
-// 4. 在视图中可以看到每个 cell 的线框
 
-// --- 主函数 ---
-
+void visualizeCell_main(int ptnum)
+{
 // 读取体素信息
-int x = point(0, "voxel_x", @ptnum);
-int y = point(0, "voxel_y", @ptnum);
-int z = point(0, "voxel_z", @ptnum);
+int x = point(0, "voxel_x", ptnum);
+int y = point(0, "voxel_y", ptnum);
+int z = point(0, "voxel_z", ptnum);
 
 // 读取基础体素信息（与 marchCubeForBoundaryVEX.txt 一致）
 vector base_voxel_size;
-vector min_bound = point(0, "min_bound", @ptnum);
-vector voxel_size = point(0, "voxel_size", @ptnum);
-int voxel_scale = point(0, "voxel_scale", @ptnum);
+vector min_bound = point(0, "min_bound", ptnum);
+vector voxel_size = point(0, "voxel_size", ptnum);
+int voxel_scale = point(0, "voxel_scale", ptnum);
 
 // 如果存在 base_voxel_size，使用它（与 marchCubeForBoundaryVEX 一致）
 // base_voxel_scale 固定为 1，不需要读取
 if (hasattrib(0, "point", "base_voxel_size")) {
-    base_voxel_size = point(0, "base_voxel_size", @ptnum);
+    base_voxel_size = point(0, "base_voxel_size", ptnum);
 } else {
     // 如果没有 base_voxel_size，使用 voxel_size 作为基础值
     base_voxel_size = voxel_size;
@@ -39,7 +38,7 @@ if (hasattrib(0, "point", "base_voxel_size")) {
 // 确定坐标系原点（优先使用 chunk_origin）
 vector origin;
 if (hasattrib(0, "point", "chunk_origin")) {
-    origin = point(0, "chunk_origin", @ptnum);
+    origin = point(0, "chunk_origin", ptnum);
 } else {
     origin = min_bound;
 }
@@ -69,7 +68,7 @@ resize(corner_pts, 8);
 vector line_color = set(0.5, 0.5, 0.5);  // 默认灰色
 
 if (hasattrib(0, "point", "is_boundary_lowres")) {
-    int is_boundary = point(0, "is_boundary_lowres", @ptnum);
+    int is_boundary = point(0, "is_boundary_lowres", ptnum);
     if (is_boundary == 1) {
         line_color = set(0, 1, 0);  // 绿色：boundary cell
     }
@@ -114,4 +113,5 @@ setprimattrib(0, "Cd", edge10, line_color);
 setprimattrib(0, "Cd", edge11, line_color);
 
 // 标记删除原始点（可选，如果想保留原始点可以注释掉）
-// @group_del = 1;
+// 如需要删除，在调用函数后使用：setpointgroup(0, "del", @ptnum, 1, "set");
+}

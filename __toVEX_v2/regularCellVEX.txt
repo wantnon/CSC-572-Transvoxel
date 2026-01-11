@@ -1,3 +1,8 @@
+// 供 AttribWrangle 使用：把原始脚本包进函数，避免被当作"全局作用域脚本"解析时报错
+// 用法（写在 Detail Wrangle 的 VEXpression 里）：
+//   #include "regularCellVEX.txt"
+//   regularCell_main();
+//
 // VEX Code for Detail Wrangle - 从 chunkVEX 输出中过滤出 regular cell 点
 // 重要：此代码必须在 Detail Wrangle 节点中使用（Run Over=Detail）！
 // Input 0: chunkVEX 输出的体素点云
@@ -16,6 +21,8 @@
 // - lodLevel_Z_positive, lodLevel_Z_negative: Z 轴正/负方向的相邻 chunk 的 LOD 级别
 //   如果某个方向没有相邻 chunk，可以设置为 -1
 
+void regularCell_main()
+{
 // --- 获取参数 ---
 int lod_level = chi("lodLevel");  // 当前 chunk 的 LOD 级别
 int lod_level_X_positive = chi("lodLevel_X_positive");
@@ -163,4 +170,4 @@ for (int i = num_points - 1; i >= 0; i--) {
         setpointattrib(0, "lod_level", i, lod_level);
     }
 }
-
+}

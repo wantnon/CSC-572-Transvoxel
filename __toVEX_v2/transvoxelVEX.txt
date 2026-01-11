@@ -7,30 +7,9 @@
 // 根据 transition cell 点阵生成三角面
 // 每个 transition cell 点会被处理，生成相应的三角形网格
 
-// 从 input1 读取查找表数据（detail 属性）
-int transitionCellClass[];
-int transitionCellData[];
-int transitionVertexData[];
-
-// 尝试从 input1 读取查找表
-if (hasattrib(1, "detail", "transitionCellClass")) {
-    transitionCellClass = detail(1, "transitionCellClass");
-    transitionCellData = detail(1, "transitionCellData");
-    transitionVertexData = detail(1, "transitionVertexData");
-} else {
-    // 查找表不存在，尝试从 input0 读取（向后兼容）
-    if (hasattrib(0, "detail", "transitionCellClass")) {
-        transitionCellClass = detail(0, "transitionCellClass");
-        transitionCellData = detail(0, "transitionCellData");
-        transitionVertexData = detail(0, "transitionVertexData");
-    }
-}
-
-// 检查查找表是否存在
-if (len(transitionCellClass) < 512 || len(transitionCellData) < 2072 || len(transitionVertexData) < 6144) {
-    @group_del = 1;  // 标记删除，查找表数据不完整
-    return;
-}
+// 用法（写在 Wrangle 的 VEXpression 里）：
+//   #include "transvoxelVEX.txt"
+//   transvoxel_main(@ptnum);
 
 // 线性插值计算交点（与 computeTrianglesForTransvoxel 中的插值方式完全一致）
 vector VertexLerp(float isolevel; vector p1, p2; float val1, val2) {
@@ -104,40 +83,73 @@ vector ApplyOffsetClamped(vector p; vector offset; vector bmin; vector bmax) {
     return p + offset * t;
 }
 
-// --- 主函数 ---
+// 标记删除：用 point group "del" 代替 @group_del（避免在自定义函数里出现 @ 语法糖）
+void _mark_del_point(int ptnum)
+{
+    setpointgroup(0, "del", ptnum, 1, "set");
+}
+
+// --- 主函数（封装为函数，便于 #include）---
+void transvoxel_main(int ptnum)
+{
+// 从 input1 读取查找表数据（detail 属性）
+int transitionCellClass[];
+int transitionCellData[];
+int transitionVertexData[];
+
+// 尝试从 input1 读取查找表
+if (hasattrib(1, "detail", "transitionCellClass")) {
+    transitionCellClass = detail(1, "transitionCellClass");
+    transitionCellData = detail(1, "transitionCellData");
+    transitionVertexData = detail(1, "transitionVertexData");
+} else {
+    // 查找表不存在，尝试从 input0 读取（向后兼容）
+    if (hasattrib(0, "detail", "transitionCellClass")) {
+        transitionCellClass = detail(0, "transitionCellClass");
+        transitionCellData = detail(0, "transitionCellData");
+        transitionVertexData = detail(0, "transitionVertexData");
+    }
+}
+
+// 检查查找表是否存在
+if (len(transitionCellClass) < 512 || len(transitionCellData) < 2072 || len(transitionVertexData) < 6144) {
+    _mark_del_point(ptnum);  // 标记删除，查找表数据不完整
+    return;
+}
+
 float isolevel = chf("isolevel");
 
 // 只处理 transition cell 点
 int is_transition = 0;
 if (hasattrib(0, "point", "is_transition")) {
-    is_transition = point(0, "is_transition", @ptnum);
+    is_transition = point(0, "is_transition", ptnum);
 }
 
 if (is_transition != 1) {
-    @group_del = 1;  // 标记删除非 transition cell 点
+    _mark_del_point(ptnum);  // 标记删除非 transition cell 点
     return;
 }
 
 // 读取基础体素信息
-vector base_voxel_size = point(0, "base_voxel_size", @ptnum);
-vector min_bound = point(0, "min_bound", @ptnum);
-int base_voxel_scale = point(0, "base_voxel_scale", @ptnum);
-vector voxel_size = point(0, "voxel_size", @ptnum);
-int voxel_scale = point(0, "voxel_scale", @ptnum);
+vector base_voxel_size = point(0, "base_voxel_size", ptnum);
+vector min_bound = point(0, "min_bound", ptnum);
+int base_voxel_scale = point(0, "base_voxel_scale", ptnum);
+vector voxel_size = point(0, "voxel_size", ptnum);
+int voxel_scale = point(0, "voxel_scale", ptnum);
 
 // 读取 LOD 信息
-int lod_scale_0 = point(0, "lod_scale_0", @ptnum);
-int lod_scale_1 = point(0, "lod_scale_1", @ptnum);
+int lod_scale_0 = point(0, "lod_scale_0", ptnum);
+int lod_scale_1 = point(0, "lod_scale_1", ptnum);
 
 // 读取当前点的体素信息
-int x = point(0, "voxel_x", @ptnum);
-int y = point(0, "voxel_y", @ptnum);
-int z = point(0, "voxel_z", @ptnum);
+int x = point(0, "voxel_x", ptnum);
+int y = point(0, "voxel_y", ptnum);
+int z = point(0, "voxel_z", ptnum);
 
 // 读取边界方向（0=X, 1=Y, 2=Z，默认 Z）
 int boundary_axis = 2;
 if (hasattrib(0, "point", "boundary_axis")) {
-    boundary_axis = point(0, "boundary_axis", @ptnum);
+    boundary_axis = point(0, "boundary_axis", ptnum);
 }
 
 // 穷举法的绕序 case 标识（更可靠，避免符号计算的歧义）
@@ -145,25 +157,25 @@ if (hasattrib(0, "point", "boundary_axis")) {
 // C++ 版本的查找表默认是 case 4 (Z轴负方向，axis=NegativeZ)
 int winding_case = 4;  // 默认 Z轴负方向（与 C++ 约定一致）
 if (hasattrib(0, "point", "winding_case")) {
-    winding_case = point(0, "winding_case", @ptnum);
+    winding_case = point(0, "winding_case", ptnum);
 }
 
 // 兼容性保留（但主要用 winding_case）
 int boundary_sign = -1;
 if (hasattrib(0, "point", "boundary_sign")) {
-    boundary_sign = point(0, "boundary_sign", @ptnum);
+    boundary_sign = point(0, "boundary_sign", ptnum);
 }
 
 // 补一圈标记：边/角 ring 往往缺少完整邻域，half-thickness 投影偏移可能把点推到 chunk 外
 int is_makeup_ring = 0;
 if (hasattrib(0, "point", "is_makeup_ring")) {
-    is_makeup_ring = point(0, "is_makeup_ring", @ptnum);
+    is_makeup_ring = point(0, "is_makeup_ring", ptnum);
 }
 
 // 计算 chunk 边界（用于 clamp，避免补一圈导致三角面出界）
 vector origin;
 if (hasattrib(0, "point", "chunk_origin")) {
-    origin = point(0, "chunk_origin", @ptnum);
+    origin = point(0, "chunk_origin", ptnum);
 } else {
     origin = min_bound;
 }
@@ -171,10 +183,10 @@ if (hasattrib(0, "point", "chunk_origin")) {
 float chunk_size = 16.0;
 int voxel_res_attr = 32;
 if (hasattrib(0, "point", "chunk_size")) {
-    chunk_size = point(0, "chunk_size", @ptnum);
+    chunk_size = point(0, "chunk_size", ptnum);
 }
 if (hasattrib(0, "point", "voxel_res")) {
-    voxel_res_attr = point(0, "voxel_res", @ptnum);
+    voxel_res_attr = point(0, "voxel_res", ptnum);
 }
 vector chunk_min = origin;
 vector chunk_max = origin + set(chunk_size, chunk_size, chunk_size);
@@ -345,7 +357,7 @@ if (trans_corner_val[8] <= isolevel) transCubeIndex |= 16;
 
 // 如果体素完全在内部或外部，则跳过
 if (transCubeIndex == 0 || transCubeIndex == 511) {
-    @group_del = 1;  // 标记删除不需要的点
+    _mark_del_point(ptnum);  // 标记删除不需要的点
     return;
 }
 
@@ -355,14 +367,14 @@ int transCellClass = transClassRaw & 0x7F;
 int transInvertWinding = (transClassRaw & 0x80) != 0;
 
 if (transCellClass < 0 || transCellClass >= 56) {
-    @group_del = 1;
+    _mark_del_point(ptnum);
     return;
 }
 
 // 获取该类的三角化数据
 int baseIndex = transCellClass * 37;
 if (baseIndex < 0 || baseIndex + 36 >= len(transitionCellData)) {
-    @group_del = 1;
+    _mark_del_point(ptnum);
     return;
 }
 int geometryCounts = transitionCellData[baseIndex];
@@ -370,7 +382,7 @@ int vertex_count = (geometryCounts / 16) & 0x0F;
 int triangle_count = geometryCounts & 0x0F;
 
 if (vertex_count == 0) {
-    @group_del = 1;
+    _mark_del_point(ptnum);
     return;
 }
 
@@ -491,5 +503,6 @@ for (int i = 0; i < triangle_count * 3; i += 3) {
 }
 
 // 标记删除当前点阵点（三角形已生成，不再需要原始点）
-@group_del = 1;
+_mark_del_point(ptnum);
 
+}

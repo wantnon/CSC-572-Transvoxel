@@ -1,4 +1,11 @@
-// VEX Code for Detail Wrangle - 生成 Transition Cell 点阵
+// 供 AttribWrangle 使用：把原始脚本包进函数，避免被当作“全局作用域脚本”解析时报错
+// 用法（写在 Wrangle 的 VEXpression 里）：
+//   #include "boundaryCellVEX.txt"
+//   boundaryCell_main();
+
+void boundaryCell_main()
+{
+// VEX Code for Detail Wrangle - 生成 Boundary Cell 点阵（补一圈版本）
 // Input 0: trunk0 体素点云（来自 chunkVEX.txt）
 // Input 1: trunk1 体素点云（来自 chunkVEX.txt）
 // Input 2: fog VDB volume（用于实时采样密度值，可选）
@@ -7,12 +14,21 @@
 // - lodLevel0: trunk0 的 LOD 级别
 // - lodLevel1: trunk1 的 LOD 级别
 //
-// 实现思路：
-// 1. 确定使用低分辨率侧的坐标系（降采样后的坐标系）
-// 2. 在低分辨率坐标系中，确定两个 trunk 的相对位置和边界方向
-// 3. 计算边界位置（在拼接后的坐标系中）
-// 4. 按照 pointsVEX 的方法生成 transition cell
-
+// 功能：
+// 生成低分辨率边界 regular cell，用于补齐 transition cell 与低分辨率区域之间的空隙
+// 对应 pointsVEX.txt 中的"低分辨率边界 regular cell"
+//
+// 与 boundaryCellVEX.txt 的差异（补一圈）：
+// - 原版在边界平面上两维的遍历是：for (v = voxel_scale; v < voxel_res - 1; v += voxel_scale)
+//   在 voxel_res=32, voxel_scale=2 时得到 2,4,...,30 => 15 个（15x15）
+// - 本版本改为：for (v = voxel_scale; v <= voxel_res; v += voxel_scale)
+//   在 voxel_res=32, voxel_scale=2 时得到 2,4,...,32 => 16 个（16x16），即补齐外侧一圈
+//
+// 说明：
+// - 这里的 voxel_x/y/z 被当作“upper corner（右上前角）”的网格坐标（与 pointsVEX/ formerVersionVEX 语义一致）
+// - 允许取到 voxel_res（例如 32），意味着会生成覆盖到 chunk 边界（16m 处）的那一圈 cell
+// - 若你的 VDB/体素场在边界处没有 padding，可能会暴露边/角 case（重复/缺口/越界采样），这属于正常现象
+//
 // --- 参数 ---
 int lod_level_0 = chi("lodLevel0");  // trunk0 的 LOD 级别
 int lod_level_1 = chi("lodLevel1");  // trunk1 的 LOD 级别
@@ -20,10 +36,9 @@ int lod_level_1 = chi("lodLevel1");  // trunk1 的 LOD 级别
 lod_level_0 = max(lod_level_0, 0);
 lod_level_1 = max(lod_level_1, 0);
 
-// 重要：当两侧 LOD 相同（例如 1 vs 1）时，不应生成 transition cell
-// 否则会出现不该存在的 transTris，绕序/法线在某些方向上看起来“反了”
+// 重要：当两侧 LOD 相同（例如 1 vs 1）时，不应生成 boundary cell
+// boundary cell 只用于“transition cell 与低分辨率区域之间”的补齐
 if (lod_level_0 == lod_level_1) {
-    // 清除输入点并直接返回（输出空几何）
     int npt = npoints(0);
     for (int i = npt - 1; i >= 0; --i) {
         removepoint(0, i);
@@ -82,7 +97,7 @@ if (npoints(1) > 0 && hasattrib(1, "point", "chunk_origin")) {
 }
 
 // 确定使用哪个 trunk 的坐标系（低分辨率侧）
-// transition cell 应该在低分辨率侧生成
+// boundary cell 应该在低分辨率侧生成，与 transition cell 在同一层
 vector min_bound;
 vector chunk_origin;
 int use_trunk1_coord = 0;
@@ -118,8 +133,7 @@ if (lod_level_1 >= lod_level_0) {
 int voxel_scale = base_voxel_scale * lod_scale_lowres;
 vector voxel_size = base_voxel_size;  // 基础体素大小，不乘以 LOD 缩放
 
-// 确定边界方向和位置
-// 使用 chunkID 差异来确定边界方向
+// 确定边界方向和位置（与 transCellVEX.txt 一致）
 int chunk_diff_x = chunk_x_1 - chunk_x_0;
 int chunk_diff_y = chunk_y_1 - chunk_y_0;
 int chunk_diff_z = chunk_z_1 - chunk_z_0;
@@ -128,51 +142,26 @@ int abs_chunk_x = abs(chunk_diff_x);
 int abs_chunk_y = abs(chunk_diff_y);
 int abs_chunk_z = abs(chunk_diff_z);
 
-// 找出差异最大的方向，那就是边界方向
 int boundary_axis = 2;  // 默认 Z 方向 (0=X, 1=Y, 2=Z)
 int lod_boundary;
-// 穷举法：为所有可能的边界方向和高分辨率位置组合生成明确的 winding_case 标识
-// winding_case = boundary_axis * 2 + (high_res_in_positive ? 1 : 0)
-// 这样可以精确控制每种情况下的绕序翻转，避免符号计算的歧义
-// 0: X轴边界, 高分辨率在负方向 (chunk_diff < 0)
-// 1: X轴边界, 高分辨率在正方向 (chunk_diff > 0)
-// 2: Y轴边界, 高分辨率在负方向
-// 3: Y轴边界, 高分辨率在正方向
-// 4: Z轴边界, 高分辨率在负方向
-// 5: Z轴边界, 高分辨率在正方向
-int winding_case = 4;  // 默认 Z轴负方向
-int boundary_sign = -1;  // 兼容性保留（但主要用 winding_case）
 
 if (abs_chunk_x >= abs_chunk_y && abs_chunk_x >= abs_chunk_z) {
     // X 方向边界
     boundary_axis = 0;
-    // 计算高分辨率 trunk 相对于低分辨率 trunk 的位置
-    // 如果使用 trunk1 的坐标系，计算 trunk0 相对于 trunk1 的位置
     int chunk_diff;
     if (use_trunk1_coord) {
-        // trunk1 是低分辨率侧，trunk0 是高分辨率侧
-        chunk_diff = chunk_x_0 - chunk_x_1;  // trunk0 相对于 trunk1 的位置
+        chunk_diff = chunk_x_0 - chunk_x_1;
     } else {
-        // trunk0 是低分辨率侧，trunk1 是高分辨率侧
-        chunk_diff = chunk_x_1 - chunk_x_0;  // trunk1 相对于 trunk0 的位置
+        chunk_diff = chunk_x_1 - chunk_x_0;
     }
-    
-    // 如果高分辨率 trunk 在低分辨率 trunk 的正方向，边界在低分辨率 trunk 的最后一层
-    // 如果高分辨率 trunk 在低分辨率 trunk 的负方向，边界在低分辨率 trunk 的第一层
-    // 注意：transition cell 应该在低分辨率 trunk 的边界层，与高分辨率 trunk 对齐
-    int lod_scale_highres = use_trunk1_coord ? lod_scale_0 : lod_scale_1;
+
     if (chunk_diff > 0) {
-        lod_boundary = voxel_res - 1;  // 高分辨率 trunk 在正方向，边界在最后一层
-        winding_case = 1;  // X轴正方向
-        boundary_sign = 1;
+        lod_boundary = voxel_res - 1;
     } else if (chunk_diff < 0) {
-        lod_boundary = voxel_scale;  // 边界在第一层
-        winding_case = 0;  // X轴负方向
-        boundary_sign = -1;
+        // 高分辨率 trunk 在负方向，边界在第一层
+        lod_boundary = voxel_scale;
     } else {
         lod_boundary = voxel_res / 2;
-        winding_case = 0;  // 默认负方向（与 C++ 约定一致）
-        boundary_sign = -1;
     }
 } else if (abs_chunk_y >= abs_chunk_x && abs_chunk_y >= abs_chunk_z) {
     // Y 方向边界
@@ -183,19 +172,13 @@ if (abs_chunk_x >= abs_chunk_y && abs_chunk_x >= abs_chunk_z) {
     } else {
         chunk_diff = chunk_y_1 - chunk_y_0;
     }
-    
+
     if (chunk_diff > 0) {
         lod_boundary = voxel_res - 1;
-        winding_case = 3;  // Y轴正方向
-        boundary_sign = 1;
     } else if (chunk_diff < 0) {
         lod_boundary = voxel_scale;
-        winding_case = 2;  // Y轴负方向
-        boundary_sign = -1;
     } else {
         lod_boundary = voxel_res / 2;
-        winding_case = 2;  // 默认负方向
-        boundary_sign = -1;
     }
 } else {
     // Z 方向边界（默认）
@@ -206,19 +189,13 @@ if (abs_chunk_x >= abs_chunk_y && abs_chunk_x >= abs_chunk_z) {
     } else {
         chunk_diff = chunk_z_1 - chunk_z_0;
     }
-    
+
     if (chunk_diff > 0) {
         lod_boundary = voxel_res - 1;
-        winding_case = 5;  // Z轴正方向
-        boundary_sign = 1;
     } else if (chunk_diff < 0) {
         lod_boundary = voxel_scale;
-        winding_case = 4;  // Z轴负方向（默认，与 C++ 约定一致）
-        boundary_sign = -1;
     } else {
         lod_boundary = voxel_res / 2;
-        winding_case = 4;  // 默认负方向
-        boundary_sign = -1;
     }
 }
 
@@ -228,39 +205,32 @@ for (int i = num_points - 1; i >= 0; i--) {
     removepoint(0, i);
 }
 
-// --- 按照 pointsVEX 的方法生成 transition cell ---
-// 根据边界方向，固定相应的坐标，循环另外两个坐标
-// 注意：transition cell 应该在低分辨率 trunk 的边界层，朝向高分辨率 trunk
+// --- 生成 boundary cell 点阵（补一圈）---
+// boundary cell 与 transition cell 在同一层（lod_boundary），使用相同的遍历方式
+// 注意：这里将“另外两维”的范围补到 <= voxel_res
 int x, y, z;
 
 if (boundary_axis == 0) {
     // X 方向边界：固定 x = lod_boundary，循环 y 和 z
-    // lod_boundary 是低分辨率 trunk 的边界层坐标（网格坐标）
-    // 补充一圈：包括从 voxel_scale 到 voxel_res 的所有点（与 boundaryCellVEX_makeup 一致）
-    // 原版：z < voxel_res - 1 => 2,4,...,30 => 15 个（15x15）
-    // 本版本：z <= voxel_res => 2,4,...,32 => 16 个（16x16），即补齐外侧一圈
     x = lod_boundary;
     for (int z = voxel_scale; z <= voxel_res; z += voxel_scale) {
         for (int y = voxel_scale; y <= voxel_res; y += voxel_scale) {
-            // 计算 transition cell 中心位置（与 pointsVEX.txt 一致）
-            // 使用低分辨率 trunk 的 min_bound 和坐标系
+            // 计算 boundary cell 中心位置（与 pointsVEX.txt 一致）
             vector voxel_center = min_bound + (set(x, y, z) - set(voxel_scale, voxel_scale, voxel_scale) * 0.5) * voxel_size;
-            
-            // 创建点，位置在体素中心
+
             int pt = addpoint(0, voxel_center);
-            
+
             // 存储体素的网格索引
             setpointattrib(0, "voxel_x", pt, x);
             setpointattrib(0, "voxel_y", pt, y);
             setpointattrib(0, "voxel_z", pt, z);
-            
+
             // 存储体素大小和边界信息
             setpointattrib(0, "voxel_size", pt, voxel_size);
             setpointattrib(0, "min_bound", pt, min_bound);
             setpointattrib(0, "voxel_scale", pt, voxel_scale);
-            // 传递 chunk_origin，避免下游靠 min_bound fallback（与 chunkVEX/ marchCubeVEX 习惯一致）
             setpointattrib(0, "chunk_origin", pt, chunk_origin);
-            
+
             // 存储 LOD 信息
             setpointattrib(0, "lod_level_0", pt, lod_level_0);
             setpointattrib(0, "lod_level_1", pt, lod_level_1);
@@ -268,21 +238,17 @@ if (boundary_axis == 0) {
             setpointattrib(0, "lod_scale_1", pt, lod_scale_1);
             setpointattrib(0, "base_voxel_size", pt, base_voxel_size);
             setpointattrib(0, "base_voxel_scale", pt, base_voxel_scale);
-            
-            // 标记为 transition cell
-            setpointattrib(0, "is_transition", pt, 1);
+
+            // 标记为 boundary cell（低分辨率边界 regular cell）
+            setpointattrib(0, "is_boundary_lowres", pt, 1);
             setpointattrib(0, "boundary_axis", pt, boundary_axis);
-            // 穷举法的绕序 case 标识：用于 transvoxelVEX 精确查表决定是否需要翻转
-            setpointattrib(0, "winding_case", pt, winding_case);
-            // 兼容性保留（但主要用 winding_case）
-            setpointattrib(0, "boundary_sign", pt, boundary_sign);
             // 补一圈标记：用于下游在边/角处做保护（避免 half-thickness 偏移把点推到 chunk 外）
             int is_makeup_ring = (y == voxel_res) || (z == voxel_res);
             setpointattrib(0, "is_makeup_ring", pt, is_makeup_ring);
             // 传递 chunk 尺寸/分辨率，便于下游做边界 clamp
             setpointattrib(0, "chunk_size", pt, chunk_size);
             setpointattrib(0, "voxel_res", pt, voxel_res);
-            
+
             // 计算体素中心的密度值用于颜色可视化
             float center_density = 0.0;
             if (hasattrib(2, "volume", "density")) {
@@ -294,48 +260,36 @@ if (boundary_axis == 0) {
     }
 } else if (boundary_axis == 1) {
     // Y 方向边界：固定 y = lod_boundary，循环 x 和 z
-    // 补充一圈：包括从 voxel_scale 到 voxel_res 的所有点（与 boundaryCellVEX_makeup 一致）
     y = lod_boundary;
     for (int z = voxel_scale; z <= voxel_res; z += voxel_scale) {
         for (int x = voxel_scale; x <= voxel_res; x += voxel_scale) {
-            // 计算 transition cell 中心位置（与 pointsVEX.txt 一致）
             vector voxel_center = min_bound + (set(x, y, z) - set(voxel_scale, voxel_scale, voxel_scale) * 0.5) * voxel_size;
-            
-            // 创建点，位置在体素中心
+
             int pt = addpoint(0, voxel_center);
-            
-            // 存储体素的网格索引
+
             setpointattrib(0, "voxel_x", pt, x);
             setpointattrib(0, "voxel_y", pt, y);
             setpointattrib(0, "voxel_z", pt, z);
-            
-            // 存储体素大小和边界信息
+
             setpointattrib(0, "voxel_size", pt, voxel_size);
             setpointattrib(0, "min_bound", pt, min_bound);
             setpointattrib(0, "voxel_scale", pt, voxel_scale);
-            // 传递 chunk_origin，避免下游靠 min_bound fallback（与 chunkVEX/ marchCubeVEX 习惯一致）
             setpointattrib(0, "chunk_origin", pt, chunk_origin);
-            
-            // 存储 LOD 信息
+
             setpointattrib(0, "lod_level_0", pt, lod_level_0);
             setpointattrib(0, "lod_level_1", pt, lod_level_1);
             setpointattrib(0, "lod_scale_0", pt, lod_scale_0);
             setpointattrib(0, "lod_scale_1", pt, lod_scale_1);
             setpointattrib(0, "base_voxel_size", pt, base_voxel_size);
             setpointattrib(0, "base_voxel_scale", pt, base_voxel_scale);
-            
-            // 标记为 transition cell
-            setpointattrib(0, "is_transition", pt, 1);
+
+            setpointattrib(0, "is_boundary_lowres", pt, 1);
             setpointattrib(0, "boundary_axis", pt, boundary_axis);
-            setpointattrib(0, "boundary_sign", pt, boundary_sign);
-            // 补一圈标记：用于下游在边/角处做保护（避免 half-thickness 偏移把点推到 chunk 外）
             int is_makeup_ring = (x == voxel_res) || (z == voxel_res);
             setpointattrib(0, "is_makeup_ring", pt, is_makeup_ring);
-            // 传递 chunk 尺寸/分辨率，便于下游做边界 clamp
             setpointattrib(0, "chunk_size", pt, chunk_size);
             setpointattrib(0, "voxel_res", pt, voxel_res);
-            
-            // 计算体素中心的密度值用于颜色可视化
+
             float center_density = 0.0;
             if (hasattrib(2, "volume", "density")) {
                 center_density = volumesample(2, "density", voxel_center);
@@ -346,48 +300,36 @@ if (boundary_axis == 0) {
     }
 } else {
     // Z 方向边界（默认）：固定 z = lod_boundary，循环 x 和 y
-    // 补充一圈：包括从 voxel_scale 到 voxel_res 的所有点（与 boundaryCellVEX_makeup 一致）
     z = lod_boundary;
     for (int y = voxel_scale; y <= voxel_res; y += voxel_scale) {
         for (int x = voxel_scale; x <= voxel_res; x += voxel_scale) {
-            // 计算 transition cell 中心位置（与 pointsVEX.txt 一致）
             vector voxel_center = min_bound + (set(x, y, z) - set(voxel_scale, voxel_scale, voxel_scale) * 0.5) * voxel_size;
-            
-            // 创建点，位置在体素中心
+
             int pt = addpoint(0, voxel_center);
-            
-            // 存储体素的网格索引
+
             setpointattrib(0, "voxel_x", pt, x);
             setpointattrib(0, "voxel_y", pt, y);
             setpointattrib(0, "voxel_z", pt, z);
-            
-            // 存储体素大小和边界信息
+
             setpointattrib(0, "voxel_size", pt, voxel_size);
             setpointattrib(0, "min_bound", pt, min_bound);
             setpointattrib(0, "voxel_scale", pt, voxel_scale);
-            // 传递 chunk_origin，避免下游靠 min_bound fallback（与 chunkVEX/ marchCubeVEX 习惯一致）
             setpointattrib(0, "chunk_origin", pt, chunk_origin);
-            
-            // 存储 LOD 信息
+
             setpointattrib(0, "lod_level_0", pt, lod_level_0);
             setpointattrib(0, "lod_level_1", pt, lod_level_1);
             setpointattrib(0, "lod_scale_0", pt, lod_scale_0);
             setpointattrib(0, "lod_scale_1", pt, lod_scale_1);
             setpointattrib(0, "base_voxel_size", pt, base_voxel_size);
             setpointattrib(0, "base_voxel_scale", pt, base_voxel_scale);
-            
-            // 标记为 transition cell
-            setpointattrib(0, "is_transition", pt, 1);
+
+            setpointattrib(0, "is_boundary_lowres", pt, 1);
             setpointattrib(0, "boundary_axis", pt, boundary_axis);
-            setpointattrib(0, "boundary_sign", pt, boundary_sign);
-            // 补一圈标记：用于下游在边/角处做保护（避免 half-thickness 偏移把点推到 chunk 外）
             int is_makeup_ring = (x == voxel_res) || (y == voxel_res);
             setpointattrib(0, "is_makeup_ring", pt, is_makeup_ring);
-            // 传递 chunk 尺寸/分辨率，便于下游做边界 clamp
             setpointattrib(0, "chunk_size", pt, chunk_size);
             setpointattrib(0, "voxel_res", pt, voxel_res);
-            
-            // 计算体素中心的密度值用于颜色可视化
+
             float center_density = 0.0;
             if (hasattrib(2, "volume", "density")) {
                 center_density = volumesample(2, "density", voxel_center);
@@ -397,4 +339,7 @@ if (boundary_axis == 0) {
         }
     }
 }
+
+}
+
 

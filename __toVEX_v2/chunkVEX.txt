@@ -1,3 +1,8 @@
+// 供 AttribWrangle 使用：把原始脚本包进函数，避免被当作"全局作用域脚本"解析时报错
+// 用法（写在 Detail Wrangle 的 VEXpression 里）：
+//   #include "chunkVEX.txt"
+//   chunk_main();
+//
 // VEX Code for Detail Wrangle - 根据 chunkID 生成 chunk 体素点阵
 // 
 // 重要：此代码必须在 Detail Wrangle 节点中使用！
@@ -10,17 +15,9 @@
 // - 每个体素格以位于体素中心的一个 point 表示
 // - 按照 MarchingCubesCS.usf 的方式：不存储任何角点数据
 //   角点位置和密度值将在后续节点中从体素索引实时计算和采样
-//
-// 使用方法：
-// 1. 在 Houdini 中创建一个 Detail Wrangle 节点
-// 2. 将此代码复制到 VEXpression 中
-// 3. 在参数面板设置 chunk_x, chunk_y, chunk_z 值
-//
-// 注意：
-// - 如果看不到点，检查视图范围，点会在原点 (0,0,0) 附近
-// - 可以通过修改 chunkID 来移动 chunk 的位置
-// - 查看控制台输出确认代码是否执行
 
+void chunk_main()
+{
 // --- 参数设置 ---
 // Chunk 尺寸（米）
 float chunk_size = 16.0;  // 每个 chunk 的尺寸（16m x 16m x 16m）
@@ -95,4 +92,4 @@ for (int z = 0; z < voxel_res; z++) {
         }
     }
 }
-
+}

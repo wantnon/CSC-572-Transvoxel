@@ -15,11 +15,6 @@
 // - 不存储任何角点数据
 // - corner_pos 和 corner_val 都从体素索引实时计算和采样
 
-// 从 input1 读取查找表数据（detail 属性）
-int regularCellClass[] = detail(1, "regularCellClass");
-int regularCellData[] = detail(1, "regularCellData");
-int regularVertexData[] = detail(1, "regularVertexData");
-
 // 线性插值计算交点（与computeTrianglesForVoxel中的插值方式完全一致）
 vector VertexLerp(float isolevel; vector p1, p2; float val1, val2) {
     if (abs(isolevel - val1) < 0.00001) return p1;
@@ -79,14 +74,32 @@ vector ProjectToTangentPlane(vector offset; vector normal) {
     return offset - dot_product * normal;
 }
 
+// 标记删除：用 point group "del" 代替 @group_del（避免在自定义函数里出现 @ 语法糖）
+void _mark_del_point(int ptnum)
+{
+    setpointgroup(0, "del", ptnum, 1, "set");
+}
+
+// 供 AttribWrangle 使用：把原始脚本包进函数，避免被当作"全局作用域脚本"解析时报错
+// 用法（写在 Point Wrangle 的 VEXpression 里）：
+//   #include "marchCubeVEX_modify.txt"
+//   marchCubeVEX_modify_main(@ptnum);
+
 // --- 主函数 ---
+void marchCubeVEX_modify_main(int ptnum)
+{
+// 从 input1 读取查找表数据（detail 属性）
+int regularCellClass[] = detail(1, "regularCellClass");
+int regularCellData[] = detail(1, "regularCellData");
+int regularVertexData[] = detail(1, "regularVertexData");
+
 float isolevel = chf("isolevel"); // 从通道获取isolevel
 
 // 读取 LOD 级别：优先从点属性读取（如果来自 regularCellVEX），否则从参数读取
 int lod_level = chi("lodLevel");  // 从通道获取 LOD 级别（默认值）
 if (hasattrib(0, "point", "lod_level")) {
     // 如果点属性中有 lod_level，使用点属性的值（来自 regularCellVEX）
-    lod_level = point(0, "lod_level", @ptnum);
+    lod_level = point(0, "lod_level", ptnum);
 }
 
 // 确保 lodLevel 非负
@@ -100,8 +113,8 @@ lod_level = max(lod_level, 0);
 int lod_scale = (int)pow(2.0, lod_level);  // 2^lodLevel: 1, 2, 4, 8, 16, 32, ...
 
 // 读取基础体素信息
-vector base_voxel_size = point(0, "voxel_size", @ptnum);
-vector min_bound = point(0, "min_bound", @ptnum);
+vector base_voxel_size = point(0, "voxel_size", ptnum);
+vector min_bound = point(0, "min_bound", ptnum);
 
 // base_voxel_scale 固定为 1（chunkVEX 总是输出 voxel_scale = 1）
 int base_voxel_scale = 1;
@@ -110,7 +123,7 @@ int base_voxel_scale = 1;
 // 如果 voxel_scale 已经大于 1，说明已经正确设置，直接使用
 // 否则根据 LOD 级别计算（向后兼容直接来自 chunkVEX 的输入）
 int voxel_scale;
-int read_voxel_scale = point(0, "voxel_scale", @ptnum);
+int read_voxel_scale = point(0, "voxel_scale", ptnum);
 if (read_voxel_scale > 1) {
     voxel_scale = read_voxel_scale;  // 使用已设置的 voxel_scale
 } else {
@@ -123,13 +136,13 @@ vector voxel_size = base_voxel_size * lod_scale;
 // 检查是否为边界低分辨率体素（如果存在该属性）
 int is_boundary_lowres = 0;
 if (hasattrib(0, "point", "is_boundary_lowres")) {
-    is_boundary_lowres = point(0, "is_boundary_lowres", @ptnum);
+    is_boundary_lowres = point(0, "is_boundary_lowres", ptnum);
 }
 
 // 读取体素索引
-int x = point(0, "voxel_x", @ptnum);
-int y = point(0, "voxel_y", @ptnum);
-int z = point(0, "voxel_z", @ptnum);
+int x = point(0, "voxel_x", ptnum);
+int y = point(0, "voxel_y", ptnum);
+int z = point(0, "voxel_z", ptnum);
 
 // 注意：如果输入来自 regularCellVEX，LOD 过滤已经在 regularCellVEX 中完成
 // 所以这里不需要再做 LOD 过滤，直接处理所有输入的点
@@ -182,9 +195,9 @@ corner_offsets[7] = set(1, 1, 1);
 // 优先使用 chunk_origin（如果存在），否则使用 min_bound
 vector origin;
 if (hasattrib(0, "point", "chunk_origin")) {
-    origin = point(0, "chunk_origin", @ptnum);
+    origin = point(0, "chunk_origin", ptnum);
 } else {
-    origin = point(0, "min_bound", @ptnum);
+    origin = point(0, "min_bound", ptnum);
 }
 
 // 实时计算8个角点的世界坐标位置并从 VDB 采样密度值
@@ -252,7 +265,7 @@ if (corner_val[7] <= isolevel) cube_index |= 128;
 
             // 如果体素完全在内部或外部，则跳过
 if (cube_index == 0 || cube_index == 255) {
-    @group_del = 1;  // 标记删除不需要的点
+    _mark_del_point(ptnum);  // 标记删除不需要的点
     return;
 }
 
@@ -266,7 +279,7 @@ int vertex_count = (geometryCounts / 16) & 0x0F;  // 顶点数
 int triangle_count = geometryCounts & 0x0F;       // 三角形数
 
 if (vertex_count == 0) {
-    @group_del = 1;  // 标记删除没有顶点的点
+    _mark_del_point(ptnum);  // 标记删除没有顶点的点
     return;
 }
 
@@ -352,4 +365,5 @@ for (int i = 0; i < triangle_count * 3; i += 3) {
 // 标记删除当前点阵点（三角形已生成，不再需要原始点）
 // 注意：在 Point Wrangle 中直接 removepoint 可能不会立即生效
 // 建议在后续添加 Blast 节点，Group 设为 "del"，Delete Non-Selected 设为 "Selected"
-@group_del = 1;
+_mark_del_point(ptnum);
+}
